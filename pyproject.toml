@@ -1,0 +1,14 @@
+[project]
+name = "robot-101"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "lerobot[feetech,placo-dep]",
+    "pygame>=2.6",
+]
+
+[tool.uv]
+python-preference = "only-managed"
+
+[tool.uv.sources]
+lerobot = { path = "lerobot", editable = true }
