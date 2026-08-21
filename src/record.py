@@ -17,7 +17,8 @@ from lerobot.utils.robot_utils import precise_sleep
 from xboxController import MyTeleopConfig, xboxController
 
 from utility import FPS, show_cameras, print_joint_angles, go_to_rest, ask_question, ease_to_position, NEUTRAL_POS, focus_pygame_window
-
+from utility import features 
+from utility import joint_names
 
 
 from lerobot.datasets import LeRobotDataset
@@ -86,36 +87,7 @@ def main():
 
     repo_id = "kdaterao/so101_data"
     dataset_root = HF_LEROBOT_HOME / repo_id
-    joint_names = [
-        "shoulder_pan",
-        "shoulder_lift",
-        "elbow_flex",
-        "wrist_flex",
-        "wrist_roll",
-        "gripper",
-    ]
-    features = {
-        "observation.state": {
-            "dtype": "float32",
-            "shape": (6,),
-            "names": joint_names,
-        },
-        "observation.images.camera1": {
-            "dtype": "video",
-            "shape": (480, 640, 3),
-            "names": ["height", "width", "channel"],
-        },
-        "observation.images.camera2": {
-            "dtype": "video",
-            "shape": (480, 640, 3),
-            "names": ["height", "width", "channel"],
-        },
-        "action": {
-            "dtype": "float32",
-            "shape": (6,),
-            "names": joint_names,
-        },
-    }
+
     
     if (dataset_root / "meta" / "tasks.parquet").exists():
         print(f"Resuming local dataset at {dataset_root}")

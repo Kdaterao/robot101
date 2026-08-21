@@ -53,6 +53,40 @@ JOINT_POS_KEYS = (
 )
 
 
+joint_names = [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+]
+
+
+features = {
+    "observation.state": {
+        "dtype": "float32",
+        "shape": (6,),
+        "names": joint_names,
+    },
+    "observation.images.camera1": {
+        "dtype": "video",
+        "shape": (480, 640, 3),
+        "names": ["height", "width", "channel"],
+    },
+    "observation.images.camera2": {
+        "dtype": "video",
+        "shape": (480, 640, 3),
+        "names": ["height", "width", "channel"],
+    },
+    "action": {
+        "dtype": "float32",
+        "shape": (6,),
+        "names": joint_names,
+    },
+}
+
+
 #-------------------------------
 #  PRINTING + DEBUG UTILITEIES
 #-------------------------------
