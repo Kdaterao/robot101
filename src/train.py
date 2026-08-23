@@ -77,7 +77,7 @@ def main():
     #-----------------------
     #  TRAINING DEFINITIONS
     #-----------------------
-
+    #change here!
     training_steps = 500  # SmolVLA docs often use ~20k; 500 just a test
     log_freq = 50
     batch_size = 16
