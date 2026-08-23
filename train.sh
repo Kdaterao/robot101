@@ -17,15 +17,6 @@ cleanup() {
 
 trap cleanup INT
 
-# ffmpeg (ubuntu specific)
-sudo apt update && sudo apt install -y ffmpeg
-
-# uv environments 
-uv venv
-source .venv/bin/activate
-uv pip install -r "requirements.txt"
-
-
 #--- GET INSTANCE ID ----
 
 read -p "Enter Thunder instance ID: " INSTANCE_ID
