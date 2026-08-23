@@ -43,6 +43,12 @@ class xboxController:
         self.arm_speed = 45.0  # deg/s for pan / lift / elbow
         self.wrist_speed = math.degrees(2.0)  # ~115 deg/s
         self.gripper_speed = 40.0  # 0-100 units/s
+
+        # If the close command is more than this below the measured jaw, loosen
+        # and refuse further close (stalled on an object or hard stop).
+        self.gripper_error_threshold = 3.0
+        self.base_gripper_error_threshold = 3.0
+
         self.targets = {name: 0.0 for name in self.motor_names}
         self._synced = False
         self.pad = None
@@ -142,11 +148,52 @@ class xboxController:
             self.targets["wrist_flex"] += wrist_delta
             self._clamp_joint("wrist_flex")
 
-        # LB / RB: gripper (0-100). SO-100 joint increases as the jaw closes.
-        if self._bumper(left=True):
-            self.targets["gripper"] += self.gripper_speed * dt
+
+
+        # LB close / RB open. LeRobot gripper: 0 = closed, 100 = open.
+        actual_gripper = float(obs["gripper.pos"])
+        close_error = actual_gripper - self.targets["gripper"]
+
+
+        #--- case 1: gripper is closing ---
         if self._bumper(left=False):
+
+            if close_error > self.gripper_error_threshold:
+                #--- case 1.1: gripper is stalled ---
+                self.targets["gripper"] = actual_gripper - self.gripper_error_threshold
+                print("Gripper could be stalled, stop closing")
+            else:
+                #--- case 1.2: gripper is not stalled ---
+                self.targets["gripper"] -= self.gripper_speed * dt
+                self.targets["gripper"] = max( self.targets["gripper"], actual_gripper - self.gripper_error_threshold) #--> kinda just prevents us from even closing too hard 
+
+        #--- case 2: gripper is opening ---
+        if self._bumper(left=True):
+            if close_error > self.gripper_error_threshold:
+                #--- case 2.1: gripper is stalled ---
+                self.targets["gripper"] = actual_gripper + self.gripper_error_threshold
+                print("Gripper could be stalled, stop opening")
+            else:
+                #--- case 2.2: gripper is not stalled ---
+                self.targets["gripper"] += self.gripper_speed * dt
+                
+
+        #---- case 3: gripper cannot exert enough force -----
+        a = self.controller.get_button(0)
+        b = self.controller.get_button(1)
+
+        if (a and b) or b:
+            self.gripper_error_threshold = self.base_gripper_error_threshold
+        elif a:
+            self.gripper_error_threshold += 0.05
             self.targets["gripper"] -= self.gripper_speed * dt
+            self.targets["gripper"] = max( self.targets["gripper"], actual_gripper - self.gripper_error_threshold) #--> kinda just prevents us from even closing too hard 
+            print("tighening to:", self.gripper_error_threshold)
+        
+
         self._clamp_joint("gripper")
+
+
+    
 
         return {f"{name}.pos": self.targets[name] for name in self.motor_names}

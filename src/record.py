@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
 
+import random
 import shutil
 import time
 import sys
@@ -13,12 +14,19 @@ import pygame
 from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.feature_utils import hw_to_dataset_features
 
-from xboxController import MyTeleopConfig, xboxController
+from controllers import CONTROLLER, make_controller
 
-from utility import FPS, show_cameras, print_joint_angles, go_to_rest, ask_question, ease_to_position, NEUTRAL_POS, focus_pygame_window
+from utility import FPS, show_cameras, print_joint_angles, go_to_rest, ease_to_position, NEUTRAL_POS, preview_camera
+from utility import RANDOM_START_POSES
 from utility import features 
 from utility import joint_names
+
+
+# True: ease to a random RAND_POS* at the start of each episode.
+# False: always ease to NEUTRAL_POS.
+USE_RANDOM_START = False #--> only do this if we get a good baseline !
 
 
 from lerobot.datasets import LeRobotDataset
@@ -28,7 +36,6 @@ from lerobot.utils.constants import HF_LEROBOT_HOME
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((500, 500))
 
     #------------------
     #  Confirm Cameras 
@@ -36,24 +43,10 @@ def main():
     front_index = 0
     top_index = 1
 
-    '''
+    
     for i in range(2):
         print(i)
         preview_camera(i)
-
-        whichCamera = ask_question(pygame, screen, "t = top, f = front, anything else = neither")
-
-        if whichCamera == 't':
-            top_index = i
-
-        if whichCamera == 'f':
-            front_index = i
-
-
-    if front_index == -1 or top_index == -1:
-        print("both cameras not found")
-        sys.exit()
-    '''
 
     #------------------
     #   DEFINE CONTORLLER + FOLLOWER 
@@ -74,10 +67,16 @@ def main():
 
     robot = SO100Follower(robot_config)
 
+    #---- debugging related ------
+    action_features = hw_to_dataset_features(robot.action_features, "action")
+    obs_features = hw_to_dataset_features(robot.observation_features, "observation")
+    dataset_features = {**action_features, **obs_features}
+
+    print(dataset_features)
 
     #----- CONTROLLER -------
-    controller_config = MyTeleopConfig(id="xbox_controller")
-    controller = xboxController(controller_config, robot)
+    # Switch in controllers.py: ControllerType.XBOX or ControllerType.SO100_LEADER
+    controller = make_controller(CONTROLLER, robot)
 
 
 
@@ -134,24 +133,23 @@ def main():
         #------ EPISODE RECORD LOOP ------
         while True:
 
-            
-            pygame.display.set_caption("") # reset caption
+            answer = input("type y to record new episode: ").strip().lower()
 
+            if answer == "y":
+                episode_task = input("name for episode?: ").strip()
 
-            #----- EPISODE??? ----------------
-            answer = ask_question(pygame, screen, "type y to record new episode")
-            
-            if answer == 'y':
-
-                #------ INPUT EPISODE TASK ------
-                episode_task = ask_question(pygame, screen, "name for episode?")
-
-
-                
+                pygame.display.init()
+                pygame.display.set_mode((500, 500))
                 pygame.display.set_caption("teleop — press q to quit")
-                focus_pygame_window()
 
-                ease_to_position(robot, NEUTRAL_POS)
+                if USE_RANDOM_START:
+                    pose_index = random.randrange(len(RANDOM_START_POSES))
+                    start_pos = RANDOM_START_POSES[pose_index]
+                    print(f"Easing to random start pose RAND_POS{pose_index + 1}")
+                else:
+                    start_pos = NEUTRAL_POS
+                    print("Easing to NEUTRAL_POS")
+                ease_to_position(robot, start_pos)
                 # Re-seed controller joints after the ease, and reset dt so the
                 # time spent in prompts isn't applied as one huge first step.
                 obs = robot.get_observation()
@@ -193,7 +191,7 @@ def main():
                     
                     # follow through action 
                     robot.send_action(action)
-                    show_cameras(obs)
+                    show_cameras(obs, "camera1")
 
 
 
@@ -212,12 +210,34 @@ def main():
                     precise_sleep(max(1.0 / FPS - (time.perf_counter() - loop_start), 0.0))
 
 
-                #---- SAVE EPISDOE ------
-                # Sequential encode avoids macOS leaking multiprocessing semaphores
-                # after pygame has already initialized SDL.
-                dataset.save_episode(parallel_encoding=False)
+                pygame.display.quit()
+                
+                try:
+                    print("Moving to rest pose between episodes... ")
+                    go_to_rest(robot)
+                except Exception as exc:
+                    print(f"Rest pose failed: {exc}")
 
-                episode_index += 1
+
+                good_episode = input("good episode? [y/N] ").strip().lower()
+                if good_episode == "y":
+                    
+                    dataset.save_episode()
+                else:
+
+                    print("discarding episode")
+
+                    
+                    print("BEFORE CLEAR:")
+                    print("pending frames:", dataset.has_pending_frames())
+                    print("buffer size:", dataset.writer.episode_buffer["size"])
+                    dataset.clear_episode_buffer(delete_images=True)
+                    print("AFTER CLEAR:")
+                    print("pending frames:", dataset.has_pending_frames())
+                    print("buffer size:", dataset.writer.episode_buffer["size"])
+
+         
+
             else:
                 break
 
@@ -233,18 +253,16 @@ def main():
         except Exception as exc:
             print(f"Robot disconnect failed (motors may need a power cycle): {exc}")
 
-
+        cv2.destroyAllWindows()
+        pygame.quit()
 
         try:
+            print("Encoding episode videos...")
             dataset.finalize()
         except Exception as exc:
             print(f"Dataset finalize failed: {exc}")
 
-        try:
-            answer = ask_question(pygame, screen, "y = save episodes")
-        except Exception:
-            answer = None
-
+        answer = input("Push dataset to Hugging Face? [y/N] ").strip().lower()
         if answer == "y":
             dataset.push_to_hub(
                 branch="main",
@@ -252,11 +270,6 @@ def main():
                 license="apache-2.0",
                 push_videos=True,
             )
-
-
-
-        cv2.destroyAllWindows()
-        pygame.quit()
 
 
 if __name__ == "__main__":

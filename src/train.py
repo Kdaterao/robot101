@@ -78,7 +78,7 @@ def main():
     #  TRAINING DEFINITIONS
     #-----------------------
 
-    training_steps = 5000  # SmolVLA docs often use ~20k; 5k is a first pass.
+    training_steps = 500  # SmolVLA docs often use ~20k; 500 just a test
     log_freq = 50
     batch_size = 16
 
@@ -111,6 +111,7 @@ def main():
             if step >= training_steps:
                 done = True
                 break
+            break
 
     #-----------------------
     #  SAVE

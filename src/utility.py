@@ -35,8 +35,60 @@ REST_POSE = {
     "elbow_flex.pos": 95.91,
     "wrist_flex.pos": 65.67,
     "wrist_roll.pos": -0.13,
-    "gripper.pos": 1.77,
+    "gripper.pos": 98.00,
 }
+
+
+# random starting positions for recording 
+RAND_POS1 = {
+    "shoulder_pan.pos": -62.07,
+    "shoulder_lift.pos": -20.84,
+    "elbow_flex.pos": 76.57,
+    "wrist_flex.pos": 6.68,
+    "wrist_roll.pos": -0.48,
+    "gripper.pos": 2.92,
+}
+
+RAND_POS2 = {
+    "shoulder_pan.pos": -85.10,
+    "shoulder_lift.pos": 11.69,
+    "elbow_flex.pos": 46.07,
+    "wrist_flex.pos": 6.68,
+    "wrist_roll.pos": -0.57,
+    "gripper.pos": 2.92,
+}
+
+RAND_POS3 = {
+    "shoulder_pan.pos": 16.97,
+    "shoulder_lift.pos": 21.27,
+    "elbow_flex.pos": 31.56,
+    "wrist_flex.pos": 7.03,
+    "wrist_roll.pos": -0.40,
+    "gripper.pos": 17.18,
+}
+
+RAND_POS4 = {
+    "shoulder_pan.pos": -82.02,
+    "shoulder_lift.pos": 50.64,
+    "elbow_flex.pos": -15.03,
+    "wrist_flex.pos": 7.03,
+    "wrist_roll.pos": -0.57,
+    "gripper.pos": 17.04,
+}
+
+RAND_POS5 = {
+    "shoulder_pan.pos": -16.97,
+    "shoulder_lift.pos": -9.76,
+    "elbow_flex.pos": -50.64,
+    "wrist_flex.pos": 6.95,
+    "wrist_roll.pos": -0.40,
+    "gripper.pos": 17.04,
+}
+
+RANDOM_START_POSES = (RAND_POS1, RAND_POS2, RAND_POS3, RAND_POS4, RAND_POS5)
+
+
+
 
 
 #-------------------------------
@@ -132,10 +184,14 @@ _cv_windows = set()
 _refocused_pygame = False
 
 
-def show_cameras(obs: dict) -> None:
+def show_cameras(obs: dict, camera_key = None) -> None:
     """Display robot camera frames in OpenCV windows."""
     global _refocused_pygame
+
     for key, value in obs.items():
+        if key != camera_key and camera_key: 
+            continue
+            
         if not hasattr(value, "ndim") or value.ndim != 3:
             continue
         frame = np.asarray(value)
@@ -250,8 +306,10 @@ def ease_to_position(
 
 def ask_question(pygame, screen, question):
     font = pygame.font.Font(None, 32)
+    clock = pygame.time.Clock()
 
     text = ""
+    pygame.event.clear()
 
     while True:
         for event in pygame.event.get():
@@ -288,3 +346,4 @@ def ask_question(pygame, screen, question):
         screen.blit(text_surface, (20, 50))
 
         pygame.display.flip()
+        clock.tick(30)

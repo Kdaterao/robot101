@@ -11,7 +11,7 @@ from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
 from lerobot.utils.robot_utils import precise_sleep
 
-from xboxController import MyTeleopConfig, xboxController
+from controllers import CONTROLLER, make_controller
 
 from utility import FPS, show_cameras, print_joint_angles, go_to_rest, ease_to_position, NEUTRAL_POS
 
@@ -27,8 +27,7 @@ def main():
     #------------------
 
     #---- FOLLOWER ------
-    camera_config = {"camera1": OpenCVCameraConfig(index_or_path=0, width=640, height=480, fps=FPS),
-                     "camera2": OpenCVCameraConfig(index_or_path=1, width=640, height=480, fps=FPS)}
+    camera_config = {"camera1": OpenCVCameraConfig(index_or_path=0, width=640, height=480, fps=FPS),}
     robot_config = SO100FollowerConfig(
         port="/dev/tty.usbmodem5B3E0903291",
         id="my_awesome_follower_arm",
@@ -41,8 +40,8 @@ def main():
 
 
     #----- CONTROLLER -------
-    controller_config = MyTeleopConfig(id="xbox_controller")
-    controller = xboxController(controller_config, robot)
+    # Switch in controllers.py: ControllerType.XBOX or ControllerType.SO100_LEADER
+    controller = make_controller(CONTROLLER, robot)
 
 
 
@@ -81,7 +80,7 @@ def main():
 
             action = controller.get_action(dt, obs)
             robot.send_action(action)
-            show_cameras(obs)
+            show_cameras(obs, "camera1")
 
             pygame.event.pump()
             keys = pygame.key.get_pressed()
