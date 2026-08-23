@@ -111,7 +111,6 @@ def main():
             if step >= training_steps:
                 done = True
                 break
-            break
 
     #-----------------------
     #  SAVE
