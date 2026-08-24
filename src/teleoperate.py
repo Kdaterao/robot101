@@ -11,9 +11,9 @@ from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
 from lerobot.utils.robot_utils import precise_sleep
 
-from controllers import CONTROLLER, make_controller
+from controllers import CONTROLLER, make_controller, ControllerType
 
-from utility import FPS, show_cameras, print_joint_angles, go_to_rest, ease_to_position, NEUTRAL_POS
+from utility import FPS, MAX_RELATIVE_TARGET, show_cameras, print_joint_angles, go_to_rest, ease_to_position, REST_POSE
 
 
 
@@ -33,7 +33,7 @@ def main():
         id="my_awesome_follower_arm",
         cameras=camera_config,
         use_degrees=True,
-        max_relative_target=20.0
+        max_relative_target=MAX_RELATIVE_TARGET
     )
 
     robot = SO100Follower(robot_config)
@@ -69,8 +69,13 @@ def main():
     prev_time = time.perf_counter()
 
     try:
+        if CONTROLLER == ControllerType.SO101:
+            obs = robot.get_observation()
+            start_pos = controller.get_action(0, obs)
+        else:
+            start_pos = REST_POSE
 
-        ease_to_position(robot, NEUTRAL_POS)
+        ease_to_position(robot, start_pos)
         while True:
             loop_start = time.perf_counter()
             obs = robot.get_observation()
@@ -80,7 +85,7 @@ def main():
 
             action = controller.get_action(dt, obs)
             robot.send_action(action)
-            show_cameras(obs, "camera1")
+            show_cameras(obs)
 
             pygame.event.pump()
             keys = pygame.key.get_pressed()

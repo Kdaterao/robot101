@@ -12,11 +12,11 @@ from SO101LeaderController import SOLeaderController
 
 class ControllerType(Enum):
     XBOX = "xbox"
-    SO100_LEADER = "so100_leader"
+    SO101 = "so100_leader"
 
 
 # Flip this to switch the teleop device used by teleoperate.py and record.py.
-CONTROLLER = ControllerType.XBOX
+CONTROLLER = ControllerType.SO101
 
 
 #--- SO100 Leader specific settings ---
@@ -31,7 +31,7 @@ def make_controller(controller_type: ControllerType, robot: SO100Follower):
     if controller_type is ControllerType.XBOX:
         return xboxController(MyTeleopConfig(id="xbox_controller"), robot)
 
-    if controller_type is ControllerType.SO100_LEADER:
+    if controller_type is ControllerType.SO101:
         config = SO100LeaderConfig(
             port=LEADER_PORT,
             id=LEADER_ID,

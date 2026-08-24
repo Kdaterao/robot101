@@ -65,6 +65,8 @@ def main():
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     model_id = "lerobot/smolvla_base"
+    #model_id = "kdaterao/smolVLA_desk"
+    
     model = SmolVLAPolicy.from_pretrained(model_id)
 
     preprocess, postprocess = make_pre_post_processors(
@@ -81,7 +83,7 @@ def main():
 
     pygame.display.set_caption("inference — press q to quit")
 
-    task = "pick up red object"
+    task = "pick up blue box"
     robot_type = "so101_follower"
 
     action_features = hw_to_dataset_features(robot.action_features, "action")

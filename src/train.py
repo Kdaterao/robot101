@@ -13,8 +13,8 @@ def main():
     #  SOURCE DEFINITION
     #--------------------
 
-    repo = "kdaterao/smolVLA_desk"
-    ds_repo = "kdaterao/so101_data"
+    repo = "kdaterao/smolVLA_desk2"
+    ds_repo = "kdaterao/so101_data2"
     output_directory = Path(__file__).resolve().parent.parent / "outputs" / "train" / "smolvla_desk"
     output_directory.mkdir(parents=True, exist_ok=True)
 

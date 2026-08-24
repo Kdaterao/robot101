@@ -16,9 +16,9 @@ from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.feature_utils import hw_to_dataset_features
 
-from controllers import CONTROLLER, make_controller
+from controllers import CONTROLLER, make_controller, ControllerType
 
-from utility import FPS, show_cameras, print_joint_angles, go_to_rest, ease_to_position, NEUTRAL_POS, preview_camera
+from utility import FPS, MAX_RELATIVE_TARGET, show_cameras, print_joint_angles, go_to_rest, ease_to_position, NEUTRAL_POS, REST_POSE, preview_camera
 from utility import RANDOM_START_POSES
 from utility import features 
 from utility import joint_names
@@ -62,7 +62,7 @@ def main():
         id="my_awesome_follower_arm",
         cameras=camera_config,
         use_degrees=True,
-        max_relative_target=20.0
+        max_relative_target=MAX_RELATIVE_TARGET
     )
 
     robot = SO100Follower(robot_config)
@@ -84,7 +84,7 @@ def main():
     #        DATASET
     #---------------------------
 
-    repo_id = "kdaterao/so101_data"
+    repo_id = "kdaterao/so101_data2"
     dataset_root = HF_LEROBOT_HOME / repo_id
 
     
@@ -126,10 +126,7 @@ def main():
 
     #--- logic ----
     try:
-
-
-        episode_index = 0
-
+        episode_index = 1
         #------ EPISODE RECORD LOOP ------
         while True:
 
@@ -142,13 +139,11 @@ def main():
                 pygame.display.set_mode((500, 500))
                 pygame.display.set_caption("teleop — press q to quit")
 
-                if USE_RANDOM_START:
-                    pose_index = random.randrange(len(RANDOM_START_POSES))
-                    start_pos = RANDOM_START_POSES[pose_index]
-                    print(f"Easing to random start pose RAND_POS{pose_index + 1}")
+                if CONTROLLER == ControllerType.SO101:
+                        obs = robot.get_observation()
+                        start_pos = controller.get_action(0, obs)
                 else:
-                    start_pos = NEUTRAL_POS
-                    print("Easing to NEUTRAL_POS")
+                        action = REST_POSE
                 ease_to_position(robot, start_pos)
                 # Re-seed controller joints after the ease, and reset dt so the
                 # time spent in prompts isn't applied as one huge first step.
@@ -218,10 +213,10 @@ def main():
                 except Exception as exc:
                     print(f"Rest pose failed: {exc}")
 
-
+                print("episode_index:", episode_index)
                 good_episode = input("good episode? [y/N] ").strip().lower()
                 if good_episode == "y":
-                    
+                    episode_index += 1
                     dataset.save_episode()
                 else:
 

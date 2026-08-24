@@ -3,6 +3,7 @@ import time
 import cv2
 import numpy as np
 import pygame
+from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 from lerobot.robots.so_follower import SO100Follower
 from lerobot.utils.robot_utils import precise_sleep
 
@@ -114,6 +115,11 @@ joint_names = [
     "gripper",
 ]
 
+# Arm joints stay capped for safety; gripper can jump its full 0-100 range.
+MAX_RELATIVE_TARGET = {
+    name: (100.0 if name == "gripper" else 20.0) for name in joint_names
+}
+
 
 features = {
     "observation.state": {
@@ -144,24 +150,29 @@ features = {
 #-------------------------------
 
 def preview_camera(index: int) -> None:
-    ''' Used as a utility to confirm camera indexes in OpenCV'''
+    """Preview a camera with the same capture pipeline the SO101 uses."""
 
-    cap = cv2.VideoCapture(index)
+    camera = OpenCVCamera(
+        OpenCVCameraConfig(index_or_path=index, width=640, height=480, fps=FPS)
+    )
+    camera.connect()
 
-    while True:
-        ret, frame = cap.read()
+    window = f"camera {index} | press q to quit"
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
 
-        if not ret:
-            print("Couldn't read camera")
-            break
-
-        cv2.imshow("iPhone Camera | press q to quit", frame)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
+    try:
+        while True:
+            frame = np.asarray(camera.read())
+            if frame.dtype != np.uint8:
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
+            if frame.shape[-1] == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            cv2.imshow(window, frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        camera.disconnect()
+        cv2.destroyAllWindows()
 
 
 
