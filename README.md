@@ -6,6 +6,10 @@ A small project that bundles:
 
 This repo contains model files and convenience scripts used when developing and running perception-to-action policies for the SO101 robot.
 
+
+## RESULTS
+
+A video demonstration of this robot can be found on my linkedin(https://google.com) 
 ## Stack
 - Language(s): Python (requires Python 3.12 — 3.13 compatible)
 - Framework / runtime: torch (PyTorch), LeRobot / SmolVLA policy
