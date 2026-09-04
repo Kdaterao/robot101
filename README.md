@@ -15,6 +15,20 @@ A video demonstration of this robot can be found on my linkedin(https://lnkd.in/
 - Framework / runtime: torch (PyTorch), LeRobot / SmolVLA policy
 - Notable libraries: lerobot (robot + dataset abstractions), pygame (input/display), OpenCV, Hugging Face Hub utilities
 
+
+## Files of interest (quick)
+- src/train.py
+  - Offline training loop. Uses LeRobotDataset and SmolVLAPolicy. Default dataset and model repo strings are defined inside (see code comments).
+  - Looks for local checkpoint in outputs/train/smolvla_desk; otherwise loads from hub repo (kdaterao/smolVLA_desk2 in the current script).
+- src/inference.py
+  - Live inference + robot loop. Builds an inference frame from robot sensors, runs the SmolVLA model, postprocesses to robot action, and sends the action to the robot.
+  - Example robot port and camera indices are inside; model defaults to `lerobot/smolvla_base`.
+- src/utility.py
+  - Contains FPS, REST_POSE, NEUTRAL_POS, camera preview helpers, joint-print helpers, go_to_rest, ease_to_position, and a small pygame prompt helper.
+- src/SO101/*
+  - URDF and MuJoCo files for the SO101 robot. Two calibration variants are provided: new_calib (virtual zero = middle of range) and old_calib (virtual zero = fully-extended horizontal). scene.xml uses one by default.
+
+
 ## What’s in this repo (top-level)
 - pyproject.toml / requirements.txt — project metadata & pinned dependency list
 - packages.sh — helper for installing system-level packages
@@ -29,17 +43,6 @@ A video demonstration of this robot can be found on my linkedin(https://lnkd.in/
   - robot.urdf, so101_new_calib.urdf, so101_old_calib.urdf, so101_new_calib.xml, so101_old_calib.xml, scene.xml, joints_properties.xml, assets/...
 - README.md (this file) and a small notes.md / thundercompute.md used during development
 
-## Files of interest (quick)
-- src/train.py
-  - Offline training loop. Uses LeRobotDataset and SmolVLAPolicy. Default dataset and model repo strings are defined inside (see code comments).
-  - Looks for local checkpoint in outputs/train/smolvla_desk; otherwise loads from hub repo (kdaterao/smolVLA_desk2 in the current script).
-- src/inference.py
-  - Live inference + robot loop. Builds an inference frame from robot sensors, runs the SmolVLA model, postprocesses to robot action, and sends the action to the robot.
-  - Example robot port and camera indices are inside; model defaults to `lerobot/smolvla_base`.
-- src/utility.py
-  - Contains FPS, REST_POSE, NEUTRAL_POS, camera preview helpers, joint-print helpers, go_to_rest, ease_to_position, and a small pygame prompt helper.
-- src/SO101/*
-  - URDF and MuJoCo files for the SO101 robot. Two calibration variants are provided: new_calib (virtual zero = middle of range) and old_calib (virtual zero = fully-extended horizontal). scene.xml uses one by default.
 
 ## Quickstart — install & run
 
