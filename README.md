@@ -9,7 +9,7 @@ This repo contains model files and convenience scripts used when developing and 
 
 ## RESULTS
 
-A video demonstration of this robot can be found on my linkedin(https://google.com) 
+A video demonstration of this robot can be found on my linkedin(https://lnkd.in/p/ekKawXb3)
 ## Stack
 - Language(s): Python (requires Python 3.12 — 3.13 compatible)
 - Framework / runtime: torch (PyTorch), LeRobot / SmolVLA policy
