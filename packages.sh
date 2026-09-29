@@ -8,8 +8,15 @@ set -e # anything fails just exist early
 
 #--- ENVIRONEMNT SET UP (THUNDERCOMPUTE SPECIFIC) ----
 
+
+sudo apt update 
+
 # ffmpeg (ubuntu specific)
-sudo apt update && sudo apt install -y ffmpeg
+sudo apt install -y ffmpeg
+
+#tmux (to keep instance alive)
+sudo apt install tmux
+
 
 # huggin face (linux)
 curl -LsSf https://hf.co/cli/install.sh | bash
