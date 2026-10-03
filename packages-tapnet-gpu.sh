@@ -5,6 +5,9 @@
 #   source .venv/bin/activate
 #   python src/tapnetCreate.py --data-dir data --calib calib/wrist_cam.json \
 #       --out tasks/pick_place_task.npz
+#
+# On Windows use:
+#   powershell -ExecutionPolicy Bypass -File packages-tapnet-gpu.ps1
 
 set -euo pipefail
 
@@ -48,20 +51,24 @@ if [[ ! -f "${CKPT}" ]] || [[ "$(stat -c%s "${CKPT}" 2>/dev/null || echo 0)" -lt
       "https://huggingface.co/google/tapnet/resolve/main/causal_bootstapir_checkpoint.pt"
 fi
 
-echo "==> installing PyTorch (CUDA 12.4 wheels)"
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-
-echo "==> installing local tapnet (editable)"
-uv pip install -e "./tapnet"
+echo "==> installing local tapnet (editable, --no-deps)"
+uv pip install -e "./tapnet" --no-deps
 
 echo "==> installing requirements-tapnet-gpu.txt"
 uv pip install -r "requirements-tapnet-gpu.txt"
 
+# CUDA torch LAST so editable tapnet / PyPI cannot leave a +cpu build.
+echo "==> installing PyTorch CUDA 12.4 (force)"
+uv pip uninstall torch torchvision torchaudio >/dev/null 2>&1 || true
+uv pip install --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
 echo "==> GPU sanity check"
 python - <<'PY'
 import torch
-print("torch", torch.__version__, "cuda", torch.cuda.is_available(),
-      torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu")
+print("torch", torch.__version__, "cuda", torch.cuda.is_available())
+if not torch.cuda.is_available():
+    raise SystemExit("ERROR: still on CPU torch; expected a +cu124 wheel")
+print("GPU", torch.cuda.get_device_name(0))
 from tapnet.torch import tapir_model
 print("tapnet.torch OK")
 PY
