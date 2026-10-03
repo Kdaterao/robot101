@@ -1,3 +1,6 @@
 [submodule "lerobot"]
 	path = lerobot
 	url = https://github.com/huggingface/lerobot
+[submodule "tapnet"]
+	path = tapnet
+	url = https://github.com/google-deepmind/tapnet.git
