@@ -226,18 +226,44 @@ def _default_device() -> torch.device:
     return torch.device("cpu")
 
 
+def resolve_torch_device(device: str | torch.device | None = None) -> torch.device:
+    """Resolve 'cuda' / 'cpu' / 'mps' / None → torch.device (prefer CUDA)."""
+    if device is None or device == "" or device == "auto":
+        return _default_device()
+    if isinstance(device, torch.device):
+        return device
+    d = str(device).lower()
+    if d == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA requested but torch.cuda.is_available() is False. "
+                "Install a CUDA build of PyTorch (see packages-tapnet-gpu.sh)."
+            )
+        return torch.device("cuda")
+    if d == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("MPS requested but not available")
+        return torch.device("mps")
+    if d == "cpu":
+        return torch.device("cpu")
+    raise ValueError(f"unknown device: {device}")
+
+
 class BootsTAPIR:
     """Thin wrapper around causal BootsTAPIR for offline + online tracking."""
 
     def __init__(
         self,
         checkpoint: str | Path = DEFAULT_CHECKPOINT,
-        device: torch.device | None = None,
+        device: str | torch.device | None = None,
     ):
-        self.device = device or _default_device()
+        self.device = resolve_torch_device(device)
         checkpoint = Path(checkpoint)
         if not checkpoint.is_file():
             raise FileNotFoundError(f"TAPIR checkpoint not found: {checkpoint}")
+        print(f"BootsTAPIR device: {self.device}", flush=True)
+        if self.device.type == "cuda":
+            print(f"  GPU: {torch.cuda.get_device_name(self.device)}", flush=True)
         self.model = tapir_model.TAPIR(pyramid_level=1, use_casual_conv=True)
         state = torch.load(str(checkpoint), map_location=self.device, weights_only=True)
         self.model.load_state_dict(state)
@@ -334,10 +360,16 @@ class BootsTAPIR:
         tracks = np.zeros((N, T, 2), dtype=np.float32)
         visibility = np.zeros((N, T), dtype=bool)
 
+        log_every = max(1, T // 10)
         for t, frame in enumerate(frames_rgb):
             pts, vis, causal = self.predict(frame, features, causal)
             tracks[:, t] = pts
             visibility[:, t] = vis
+            if t % log_every == 0 or t == T - 1:
+                print(
+                    f"  TAPIR [{self.device}] frame {t + 1}/{T}",
+                    flush=True,
+                )
 
         # Ensure query frame matches query (TAPIR may drift on t0)
         tracks[:, t0, 0] = np.clip(query_xy[:, 0], 0, w - 1)
@@ -403,23 +435,34 @@ def select_feature_subset(features: QueryFeatures, indices: np.ndarray) -> Query
 # ---------------------------------------------------------------------------
 
 
-def _kmeans_numpy(
-    feats: np.ndarray, k: int, n_iter: int = 40, seed: int = 42
+def _kmeans_torch(
+    feats: np.ndarray,
+    k: int,
+    n_iter: int = 40,
+    seed: int = 42,
+    device: str | torch.device | None = None,
 ) -> np.ndarray:
-    """Minimal k-means (avoids sklearn dependency)."""
-    rng = np.random.default_rng(seed)
-    n = feats.shape[0]
+    """k-means on CUDA when available (falls back to CPU torch)."""
+    device = resolve_torch_device(device)
+    # Prefer CUDA for clustering when present even if caller passed cpu by mistake
+    # only when device was auto — resolve_torch_device already prefers CUDA.
+    x = torch.as_tensor(feats, dtype=torch.float32, device=device)
+    n = int(x.shape[0])
     k = int(min(k, n))
-    centers = feats[rng.choice(n, size=k, replace=False)].copy()
-    labels = np.zeros(n, dtype=np.int32)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
+    init_idx = torch.randperm(n, generator=g)[:k]
+    centers = x[init_idx.to(device)].clone()
+    labels = torch.zeros(n, dtype=torch.long, device=device)
     for _ in range(n_iter):
-        d = ((feats[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-        labels = d.argmin(axis=1).astype(np.int32)
+        # [n, k]
+        d = torch.cdist(x, centers, p=2)
+        labels = d.argmin(dim=1)
         for c in range(k):
             m = labels == c
-            if m.any():
-                centers[c] = feats[m].mean(axis=0)
-    return labels
+            if bool(m.any()):
+                centers[c] = x[m].mean(dim=0)
+    return labels.detach().cpu().numpy().astype(np.int32)
 
 
 def cluster_motion_tracks(
@@ -428,11 +471,15 @@ def cluster_motion_tracks(
     n_clusters: int = 4,
     min_visibility: float = 0.3,
     min_path_px: float = 8.0,
+    device: str | torch.device | None = None,
 ) -> np.ndarray:
-    """Simple trajectory clustering (RoboTAP heuristics, not JAX EM).
+    """Trajectory clustering on GPU via torch k-means when CUDA is available.
 
     Returns labels [N] with -1 for rejected (low visibility / static).
     """
+    device = resolve_torch_device(device)
+    print(f"Clustering device: {device}", flush=True)
+
     N, T, _ = tracks.shape
     del T
     labels = np.full(N, -1, dtype=np.int32)
@@ -458,10 +505,10 @@ def cluster_motion_tracks(
             (path[idx] / max(w, h))[:, None],
         ],
         axis=1,
-    ).astype(np.float64)
+    ).astype(np.float32)
 
     k = int(min(n_clusters, len(idx)))
-    sub = _kmeans_numpy(feats, k)
+    sub = _kmeans_torch(feats, k, device=device)
     labels[idx] = sub.astype(np.int32)
     return labels
 

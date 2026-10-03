@@ -32,6 +32,7 @@ from tapnet_utils import (
     load_segment_bounds,
     load_wrist_calib,
     pick_object_cluster,
+    resolve_torch_device,
     sample_query_points,
     save_task_npz,
     segment_gripper_close_open,
@@ -69,6 +70,13 @@ def _parse_args() -> argparse.Namespace:
         help="Output task npz",
     )
     p.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Torch device for TAPIR + clustering: auto|cuda|cpu|mps "
+        "(auto prefers CUDA, else CPU).",
+    )
     p.add_argument(
         "--segment",
         choices=("episode", "gripper"),
@@ -140,7 +148,10 @@ def _process_demo(
     )
 
     labels = cluster_motion_tracks(
-        tracks, visibility, n_clusters=args.n_clusters
+        tracks,
+        visibility,
+        n_clusters=args.n_clusters,
+        device=args.device,
     )
     obj_c = pick_object_cluster(tracks, visibility, labels)
     active = select_active_indices(
@@ -197,7 +208,9 @@ def main() -> None:
         f"undistort={'ON' if maps is not None else 'off (zero dist)'}"
     )
 
-    tapir = BootsTAPIR(checkpoint=args.checkpoint)
+    device = resolve_torch_device(args.device)
+    print(f"tapnetCreate using device={device}", flush=True)
+    tapir = BootsTAPIR(checkpoint=args.checkpoint, device=device)
     results = [_process_demo(p, calib, maps, tapir, args) for p in demo_paths]
 
     # v1: single-demo goals, or median when multi-demo with same active count
