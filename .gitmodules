@@ -4,3 +4,6 @@
 [submodule "tapnet"]
 	path = tapnet
 	url = https://github.com/google-deepmind/tapnet.git
+[submodule "molmo"]
+	path = molmo
+	url = https://github.com/allenai/molmo.git

@@ -250,8 +250,10 @@ rendered into wrist and third-person heatmaps in the LeRobot output dataset.
 
 ## Fine-tune Molmo on SO-101 gripper points
 
-The workspace includes the original AllenAI Molmo training repository under
-`molmo/`. On a Linux NVIDIA compute machine with that workspace available, run:
+The workspace includes the original AllenAI Molmo training repository as the
+`molmo/` Git submodule. The launcher initializes it and installs the SO-101
+dataset adapter from this repository automatically. On a Linux NVIDIA compute
+machine, run:
 
 ```bash
 bash scripts/train_molmo_so101.sh

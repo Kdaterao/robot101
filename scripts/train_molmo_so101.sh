@@ -19,8 +19,15 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 2
 fi
 if [[ ! -f "${MOLMO_REPO_ROOT}/launch_scripts/train_multitask_model.py" ]]; then
+  if [[ "${MOLMO_REPO_ROOT}" == "${REPO_ROOT}/molmo" && -f "${REPO_ROOT}/.gitmodules" ]]; then
+    echo "Initializing the Molmo submodule..."
+    git -C "${REPO_ROOT}" submodule update --init molmo
+  fi
+fi
+if [[ ! -f "${MOLMO_REPO_ROOT}/launch_scripts/train_multitask_model.py" ]]; then
   echo "Molmo training repository not found at ${MOLMO_REPO_ROOT}." >&2
-  echo "Set MOLMO_REPO_ROOT to the workspace's allenai/molmo checkout." >&2
+  echo "Initialize the molmo submodule with: git submodule update --init molmo" >&2
+  echo "Or set MOLMO_REPO_ROOT to an AllenAI Molmo checkout." >&2
   exit 2
 fi
 python3 - <<'PY'
@@ -40,6 +47,9 @@ if props.total_memory < 32 * 1024**3:
 PY
 
 mkdir -p "${WORK_ROOT}" "${MOLMO_DATA_DIR}"
+python3 "${REPO_ROOT}/scripts/install_molmo_so101_adapter.py" \
+  --molmo-repo "${MOLMO_REPO_ROOT}" \
+  --adapter "${REPO_ROOT}/scripts/molmo_so101_point_dataset.py"
 python3 -m pip install --upgrade pip
 python3 -m pip install -e "${MOLMO_REPO_ROOT}[train]"
 
