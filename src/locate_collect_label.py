@@ -584,14 +584,8 @@ class PointLabeler:
     def _clamp(self, x: int, y: int) -> tuple[int, int]:
         assert self.base is not None
         h, w = self.base.shape[:2]
-        # WINDOW_NORMAL may display the frame at a different size than its pixels.
-        try:
-            _left, _top, display_w, display_h = cv2.getWindowImageRect(self.window)
-            if display_w > 0 and display_h > 0:
-                x = int(round(x * w / display_w))
-                y = int(round(y * h / display_h))
-        except (AttributeError, cv2.error):
-            pass
+        # The label window is autosized to the native image dimensions, so HighGUI
+        # callback coordinates already refer to source-image pixels.
         return max(0, min(w - 1, x)), max(0, min(h - 1, y))
 
     def _redraw(self) -> None:
@@ -669,7 +663,7 @@ def run_label_ui(
         return "empty"
 
     labeler = PointLabeler()
-    cv2.namedWindow(labeler.window, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(labeler.window, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(labeler.window, labeler.on_mouse)
 
     saved = 0
