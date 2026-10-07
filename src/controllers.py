@@ -21,20 +21,20 @@ CONTROLLER = ControllerType.SO101
 
 #--- SO100 Leader specific settings ---
 
-LEADER_PORT = "/dev/tty.usbmodem5B610348321"
+LEADER_PORT = "COM4"
 LEADER_ID = "my_awesome_leader_arm"
 
 
 
 
-def make_controller(controller_type: ControllerType, robot: SO100Follower):
+def make_controller(controller_type: ControllerType, robot: SO100Follower, leader_port=LEADER_PORT, leader_id=LEADER_ID):
     if controller_type is ControllerType.XBOX:
         return xboxController(MyTeleopConfig(id="xbox_controller"), robot)
 
     if controller_type is ControllerType.SO101:
         config = SO100LeaderConfig(
-            port=LEADER_PORT,
-            id=LEADER_ID,
+            port=leader_port,
+            id=leader_id,
             use_degrees=True,
         )
         return SOLeaderController(config)

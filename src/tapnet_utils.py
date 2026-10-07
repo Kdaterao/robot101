@@ -38,7 +38,59 @@ DEFAULT_CHECKPOINT = (
 
 
 # ---------------------------------------------------------------------------
-# Calibration / undistort (P=K, no getOptimalNewCameraMatrix)
+# Wrist camera intrinsics (edit these like test_lily_relative.py)
+# Calibrated at 1280x720, scaled x1.5 for 1920x1080. Remap with P=K.
+# ---------------------------------------------------------------------------
+FRAME_WIDTH = 1920
+FRAME_HEIGHT = 1080
+CAM_FX = 1262.480288175
+CAM_FY = 1264.71879012
+CAM_CX = 913.586772795
+CAM_CY = 609.63948621
+CAM_DIST = (
+    3.83407503,  # k1
+    -2.80771278,  # k2
+    -0.00124016194,  # p1
+    0.00296903720,  # p2
+    -0.755297301,  # k3
+    4.27744077,  # k4
+    -1.18548628,  # k5
+    -2.35292973,  # k6
+)
+
+
+def camera_matrix_from_params(
+    fx: float = CAM_FX,
+    fy: float = CAM_FY,
+    cx: float = CAM_CX,
+    cy: float = CAM_CY,
+) -> np.ndarray:
+    return np.array(
+        [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+
+def default_wrist_calib(
+    fx: float = CAM_FX,
+    fy: float = CAM_FY,
+    cx: float = CAM_CX,
+    cy: float = CAM_CY,
+    dist: tuple | list | np.ndarray = CAM_DIST,
+    width: int = FRAME_WIDTH,
+    height: int = FRAME_HEIGHT,
+) -> "WristCalib":
+    return WristCalib(
+        K=camera_matrix_from_params(fx, fy, cx, cy),
+        dist=np.asarray(dist, dtype=np.float64).reshape(-1, 1),
+        width=int(width),
+        height=int(height),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Calibration / undistort (same pattern as test_lily_relative.py:
+# remap with P=K, no getOptimalNewCameraMatrix, never stretch-resize frames)
 # ---------------------------------------------------------------------------
 
 
@@ -49,18 +101,91 @@ class WristCalib:
     width: int
     height: int
 
-    @property
-    def maps(self) -> tuple[np.ndarray, np.ndarray] | None:
-        if float(np.linalg.norm(self.dist)) <= 1e-12:
-            return None
-        return cv2.initUndistortRectifyMap(
+    def maps_for_frame(
+        self, frame_width: int, frame_height: int
+    ) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray] | None]:
+        """Lily-style maps for a native frame size.
+
+        Returns (K_used, maps_or_None). Scales K if aspect matches calib;
+        skips undistort (maps=None) if aspect differs. Never resizes the image.
+        """
+        return prepare_undistort_maps(
             self.K,
             self.dist,
-            None,
-            self.K,
-            (self.width, self.height),
-            cv2.CV_16SC2,
+            calib_width=self.width,
+            calib_height=self.height,
+            frame_width=frame_width,
+            frame_height=frame_height,
         )
+
+    @property
+    def maps(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """Maps for the calibrated resolution (create path)."""
+        _, maps = self.maps_for_frame(self.width, self.height)
+        return maps
+
+
+def prepare_undistort_maps(
+    K: np.ndarray,
+    dist: np.ndarray,
+    calib_width: int,
+    calib_height: int,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray] | None]:
+    """Build initUndistortRectifyMap exactly like test_lily_relative.py.
+
+    - If native size == calib size: remap with P=K
+    - If same aspect: scale K by sx/sy, remap at native size (no image stretch)
+    - If aspect differs: skip undistort (maps=None), keep K as-is
+    """
+    K = np.asarray(K, dtype=np.float64).reshape(3, 3).copy()
+    dist = np.asarray(dist, dtype=np.float64).reshape(-1, 1)
+    native = (int(frame_width), int(frame_height))
+    calib = (int(calib_width), int(calib_height))
+
+    k_for_frame = True
+    if native != calib:
+        sx = native[0] / float(calib[0])
+        sy = native[1] / float(calib[1])
+        if abs(sx - sy) < 0.02:
+            print(
+                f"Same aspect as calibration; scaling K by "
+                f"sx={sx:.4f} sy={sy:.4f}. Not stretching the image."
+            )
+            K[0, 0] *= sx
+            K[0, 2] *= sx
+            K[1, 1] *= sy
+            K[1, 2] *= sy
+        else:
+            k_for_frame = False
+            print(
+                f"WARNING: camera is {native[0]}x{native[1]} "
+                f"({native[0] / max(native[1], 1):.3f}:1), calibration is "
+                f"{calib[0]}x{calib[1]} "
+                f"({calib[0] / max(calib[1], 1):.3f}:1). "
+                "Not resizing (that stretches pixels and invalidates K). "
+                "Set the camera to the calibration resolution."
+            )
+
+    if (not k_for_frame) or float(np.linalg.norm(dist)) <= 1e-12:
+        if float(np.linalg.norm(dist)) > 1e-12 and not k_for_frame:
+            print("WARNING: undistort skipped; native size does not match K.")
+        return K, None
+
+    maps = cv2.initUndistortRectifyMap(
+        K,
+        dist,
+        None,
+        K,  # P=K — keep calibrated fx/fy/cx/cy
+        native,
+        cv2.CV_16SC2,
+    )
+    print(
+        "Undistort ON: remap keeps the calibrated K "
+        "(no getOptimalNewCameraMatrix / new_K)."
+    )
+    return K, maps
 
 
 def load_wrist_calib(path: str | Path) -> WristCalib:
@@ -93,9 +218,15 @@ def load_wrist_calib(path: str | Path) -> WristCalib:
 def undistort_bgr(
     frame_bgr: np.ndarray, maps: tuple[np.ndarray, np.ndarray] | None
 ) -> np.ndarray:
+    """cv2.remap with lily's INTER_LINEAR; no-op if maps is None."""
     if maps is None:
         return frame_bgr
-    return cv2.remap(frame_bgr, maps[0], maps[1], interpolation=cv2.INTER_LINEAR)
+    return cv2.remap(
+        frame_bgr,
+        maps[0],
+        maps[1],
+        interpolation=cv2.INTER_LINEAR,
+    )
 
 
 def bgr_to_rgb(frame_bgr: np.ndarray) -> np.ndarray:
@@ -103,7 +234,7 @@ def bgr_to_rgb(frame_bgr: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Demo I/O + gripper segmentation
+# Demo I/O
 # ---------------------------------------------------------------------------
 
 
@@ -159,60 +290,6 @@ def _read_video_bgr(path: Path) -> list[np.ndarray]:
     return frames
 
 
-def segment_full_episode(num_frames: int) -> tuple[int, int]:
-    """Whole recording is the segment (start at first frame, end at last).
-
-    tapnetRecord ends the episode on keypress (q); create uses that full clip.
-    """
-    n = int(num_frames)
-    if n < 2:
-        raise ValueError(f"need at least 2 frames, got {n}")
-    return 0, n - 1
-
-
-def load_segment_bounds(demo_dir: str | Path, num_frames: int) -> tuple[int, int]:
-    """Load segment.npy if present, else use the full episode."""
-    demo_dir = Path(demo_dir)
-    path = demo_dir / "segment.npy"
-    if path.is_file():
-        seg = np.load(path)
-        start, end = int(seg[0]), int(seg[1])
-        end = min(end, num_frames - 1)
-        if end <= start:
-            raise ValueError(f"invalid saved segment [{start}, {end}] in {path}")
-        return start, end
-    return segment_full_episode(num_frames)
-
-
-def segment_gripper_close_open(
-    gripper: np.ndarray,
-    close_threshold: float = 30.0,
-) -> tuple[int, int]:
-    """Return (segment_start, segment_end) = first close edge → next open edge.
-
-    Gripper convention: 0 closed … 100 open. Optional legacy mode.
-    """
-    g = np.asarray(gripper, dtype=np.float64)
-    closed = g < close_threshold
-    start = None
-    for t in range(1, len(closed)):
-        if closed[t] and not closed[t - 1]:
-            start = t
-            break
-    if start is None:
-        raise ValueError("no gripper-close transition found")
-    end = None
-    for t in range(start + 1, len(closed)):
-        if (not closed[t]) and closed[t - 1]:
-            end = t
-            break
-    if end is None:
-        end = len(g) - 1
-    if end <= start:
-        raise ValueError(f"invalid segment [{start}, {end}]")
-    return int(start), int(end)
-
-
 # ---------------------------------------------------------------------------
 # TAPIR (causal BootsTAPIR, PyTorch)
 # ---------------------------------------------------------------------------
@@ -256,7 +333,11 @@ class BootsTAPIR:
         self,
         checkpoint: str | Path = DEFAULT_CHECKPOINT,
         device: str | torch.device | None = None,
+        track_size: tuple[int, int] | None = (256, 256),
     ):
+        # Frames are resized to track_size (w, h) for TAPIR; all point
+        # coordinates in/out stay in the caller's full-resolution pixels.
+        self.track_size = track_size
         self.device = resolve_torch_device(device)
         checkpoint = Path(checkpoint)
         if not checkpoint.is_file():
@@ -276,12 +357,26 @@ class BootsTAPIR:
         frames = frames.float()
         return frames / 255.0 * 2.0 - 1.0
 
+    def _resize(self, frame_rgb: np.ndarray) -> tuple[np.ndarray, float, float]:
+        """Return (resized frame, sx, sy) where resized = full * (sx, sy)."""
+        h, w = frame_rgb.shape[:2]
+        if self.track_size is None or (w, h) == tuple(self.track_size):
+            return frame_rgb, 1.0, 1.0
+        tw, th = int(self.track_size[0]), int(self.track_size[1])
+        small = cv2.resize(frame_rgb, (tw, th), interpolation=cv2.INTER_AREA)
+        return small, tw / float(w), th / float(h)
+
     def init_features(
         self, frame_rgb: np.ndarray, query_points_tyx: np.ndarray
     ) -> QueryFeatures:
-        """frame_rgb: HxWx3 uint8. query_points_tyx: [N,3] (t,y,x) pixel."""
-        frame = torch.tensor(frame_rgb, device=self.device)
-        pts = torch.tensor(query_points_tyx, dtype=torch.float32, device=self.device)
+        """frame_rgb: HxWx3 uint8. query_points_tyx: [N,3] (t,y,x) full-res pixels."""
+        small, sx, sy = self._resize(frame_rgb)
+        q = np.asarray(query_points_tyx, dtype=np.float32).reshape(-1, 3).copy()
+        q[:, 0] = 0.0
+        q[:, 1] *= sy
+        q[:, 2] *= sx
+        frame = torch.tensor(small, device=self.device)
+        pts = torch.tensor(q, dtype=torch.float32, device=self.device)
         frames = self.preprocess(frame[None, None])
         feature_grids = self.model.get_feature_grids(frames, is_training=False)
         return self.model.get_query_features(
@@ -303,8 +398,9 @@ class BootsTAPIR:
         features: QueryFeatures,
         causal_state,
     ) -> tuple[np.ndarray, np.ndarray, Any]:
-        """Returns tracks [N,2], visibles [N], updated causal_state."""
-        frame = torch.tensor(frame_rgb, device=self.device)
+        """Returns tracks [N,2] (full-res px), visibles [N], updated causal_state."""
+        small, sx, sy = self._resize(frame_rgb)
+        frame = torch.tensor(small, device=self.device)
         frames = self.preprocess(frame[None, None])
         feature_grids = self.model.get_feature_grids(frames, is_training=False)
         trajectories = self.model.estimate_trajectories(
@@ -322,11 +418,81 @@ class BootsTAPIR:
         tracks = trajectories["tracks"][-1]
         occlusions = trajectories["occlusion"][-1]
         uncertainty = trajectories["expected_dist"][-1]
-        visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(uncertainty)) > 0.5
+        visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(uncertainty)) > 0.2
         # tracks: [1, N, 1, 2] → [N, 2]
         track_np = tracks[0, :, 0, :].detach().cpu().numpy().astype(np.float32)
+        track_np[:, 0] /= sx
+        track_np[:, 1] /= sy
         vis_np = visibles[0, :, 0].detach().cpu().numpy().astype(bool)
         return track_np, vis_np, causal_state
+
+    def track_with_features(
+        self,
+        frames_rgb,
+        features: QueryFeatures,
+        label: str = "",
+        num_frames: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Track precomputed query features through a clip.
+
+        Lets the same queries (e.g. sampled in another demo) be tracked in
+        every demo, so point i corresponds across demos. frames_rgb may be a
+        generator (frames are not kept). Returns tracks [N,T,2], visibility [N,T].
+        """
+        if num_frames is None and hasattr(frames_rgb, "__len__"):
+            num_frames = len(frames_rgb)
+        N = int(features.lowres[0].shape[1])
+        causal = self.initial_causal_state(N, features)
+        tracks: list[np.ndarray] = []
+        visibility: list[np.ndarray] = []
+        log_every = max(1, (num_frames or 100) // 10)
+        for t, frame in enumerate(frames_rgb):
+            pts, vis, causal = self.predict(frame, features, causal)
+            tracks.append(pts)
+            visibility.append(vis)
+            if t % log_every == 0 or (num_frames is not None and t == num_frames - 1):
+                print(
+                    f"  TAPIR {label} [{self.device}] frame {t + 1}/{num_frames or '?'}",
+                    flush=True,
+                )
+        if not tracks:
+            return np.zeros((N, 0, 2), np.float32), np.zeros((N, 0), bool)
+        return np.stack(tracks, axis=1), np.stack(visibility, axis=1)
+
+    def track_segment_backward(
+        self,
+        frames_rgb: list[np.ndarray] | np.ndarray,
+        query_xy_at_end: np.ndarray,
+        label: str = "",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Track points seeded at the last frame back through a stage clip.
+
+        ``frames_rgb`` is the forward-time stage clip [start..end]. Queries are
+        defined on the last frame; the clip is reversed, tracked causally, then
+        flipped back. Returns tracks [N,T,2], visibility [N,T] in forward time.
+        """
+        frames = list(frames_rgb)
+        if not frames:
+            q = np.asarray(query_xy_at_end, dtype=np.float32).reshape(-1, 2)
+            return np.zeros((len(q), 0, 2), np.float32), np.zeros((len(q), 0), bool)
+
+        query_xy = np.asarray(query_xy_at_end, dtype=np.float32).reshape(-1, 2)
+        rev = frames[::-1]
+        # query on reversed frame 0 == original last frame
+        query_tyx = np.stack(
+            [
+                np.zeros(len(query_xy), dtype=np.float32),
+                query_xy[:, 1],
+                query_xy[:, 0],
+            ],
+            axis=1,
+        )
+        features = self.init_features(rev[0], query_tyx)
+        tr_rev, vi_rev = self.track_with_features(
+            rev, features, label=label or "backward", num_frames=len(rev)
+        )
+        # flip time axis back to forward order
+        return tr_rev[:, ::-1].copy(), vi_rev[:, ::-1].copy()
 
     def track_video(
         self,
@@ -394,6 +560,70 @@ def sample_query_points(
     return np.stack([u, v], axis=1).astype(np.float32)
 
 
+def points_heatmap(
+    frame_bgr: np.ndarray,
+    points: np.ndarray,
+    visibles: np.ndarray | None = None,
+    sigma: float = 40.0,
+    alpha: float = 0.55,
+) -> np.ndarray:
+    """Overlay a jet heatmap peaked at visible track points."""
+    h, w = frame_bgr.shape[:2]
+    if len(points) == 0 or sigma <= 0:
+        return frame_bgr.copy()
+
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    if visibles is None:
+        vis = np.ones(len(pts), dtype=bool)
+    else:
+        vis = np.asarray(visibles, dtype=bool).reshape(-1)
+        if len(vis) != len(pts):
+            raise ValueError(f"visibles length {len(vis)} != points {len(pts)}")
+
+    scale = 4
+    small_h, small_w = max(1, h // scale), max(1, w // scale)
+    heat_s = np.zeros((small_h, small_w), dtype=np.float32)
+    sig_s = max(1.0, sigma / scale)
+    radius = int(max(3, round(3.0 * sig_s)))
+
+    yy, xx = np.mgrid[-radius : radius + 1, -radius : radius + 1]
+    kernel = np.exp(-(xx * xx + yy * yy) / (2.0 * sig_s * sig_s)).astype(np.float32)
+
+    for (x, y), is_vis in zip(pts, vis):
+        if not is_vis:
+            continue
+        cx = int(round(float(x) / scale))
+        cy = int(round(float(y) / scale))
+        x0, y0 = cx - radius, cy - radius
+        x1, y1 = cx + radius + 1, cy + radius + 1
+        kx0, ky0 = 0, 0
+        kx1, ky1 = kernel.shape[1], kernel.shape[0]
+        if x0 < 0:
+            kx0 = -x0
+            x0 = 0
+        if y0 < 0:
+            ky0 = -y0
+            y0 = 0
+        if x1 > small_w:
+            kx1 -= x1 - small_w
+            x1 = small_w
+        if y1 > small_h:
+            ky1 -= y1 - small_h
+            y1 = small_h
+        if x0 >= x1 or y0 >= y1:
+            continue
+        heat_s[y0:y1, x0:x1] += kernel[ky0:ky1, kx0:kx1]
+
+    if not np.any(heat_s):
+        return frame_bgr.copy()
+
+    heat = cv2.resize(heat_s, (w, h), interpolation=cv2.INTER_LINEAR)
+    heat /= max(float(heat.max()), 1e-6)
+    heat_u8 = np.clip(heat * 255.0, 0, 255).astype(np.uint8)
+    heat_color = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)
+    return cv2.addWeighted(frame_bgr, 1.0 - alpha, heat_color, alpha, 0)
+
+
 def features_to_numpy(features: QueryFeatures) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     for i, t in enumerate(features.lowres):
@@ -421,6 +651,22 @@ def features_from_numpy(data: dict[str, Any], device: torch.device) -> QueryFeat
     return QueryFeatures(lowres=lowres, hires=hires, resolutions=resolutions)
 
 
+def concat_query_features(feature_list: list[QueryFeatures]) -> QueryFeatures:
+    """Concatenate QueryFeatures along the point axis (dim 1)."""
+    if not feature_list:
+        raise ValueError("no features to concatenate")
+    first = feature_list[0]
+    lowres = [
+        torch.cat([f.lowres[i] for f in feature_list], dim=1)
+        for i in range(len(first.lowres))
+    ]
+    hires = [
+        torch.cat([f.hires[i] for f in feature_list], dim=1)
+        for i in range(len(first.hires))
+    ]
+    return QueryFeatures(lowres=lowres, hires=hires, resolutions=first.resolutions)
+
+
 def select_feature_subset(features: QueryFeatures, indices: np.ndarray) -> QueryFeatures:
     idx = np.asarray(indices, dtype=np.int64)
     lowres = [t[:, idx] for t in features.lowres]
@@ -431,7 +677,7 @@ def select_feature_subset(features: QueryFeatures, indices: np.ndarray) -> Query
 
 
 # ---------------------------------------------------------------------------
-# Motion clustering + active points + goals
+# Clustering / track helpers (used by robotap.py)
 # ---------------------------------------------------------------------------
 
 
@@ -444,8 +690,6 @@ def _kmeans_torch(
 ) -> np.ndarray:
     """k-means on CUDA when available (falls back to CPU torch)."""
     device = resolve_torch_device(device)
-    # Prefer CUDA for clustering when present even if caller passed cpu by mistake
-    # only when device was auto — resolve_torch_device already prefers CUDA.
     x = torch.as_tensor(feats, dtype=torch.float32, device=device)
     n = int(x.shape[0])
     k = int(min(k, n))
@@ -455,7 +699,6 @@ def _kmeans_torch(
     centers = x[init_idx.to(device)].clone()
     labels = torch.zeros(n, dtype=torch.long, device=device)
     for _ in range(n_iter):
-        # [n, k]
         d = torch.cdist(x, centers, p=2)
         labels = d.argmin(dim=1)
         for c in range(k):
@@ -465,190 +708,48 @@ def _kmeans_torch(
     return labels.detach().cpu().numpy().astype(np.int32)
 
 
-def cluster_motion_tracks(
-    tracks: np.ndarray,
-    visibility: np.ndarray,
-    n_clusters: int = 4,
-    min_visibility: float = 0.3,
-    min_path_px: float = 8.0,
-    device: str | torch.device | None = None,
+def track_tail_endpoint(
+    track_xy: np.ndarray,
+    visibility: np.ndarray | None = None,
+    n_tail: int = 5,
 ) -> np.ndarray:
-    """Trajectory clustering on GPU via torch k-means when CUDA is available.
+    """Goal UV = median of the last ``n_tail`` frames (prefer visible).
 
-    Returns labels [N] with -1 for rejected (low visibility / static).
+    ``track_xy`` is [T,2] or a batch [N,T,2] (returns [N,2]).
     """
-    device = resolve_torch_device(device)
-    print(f"Clustering device: {device}", flush=True)
+    arr = np.asarray(track_xy, dtype=np.float32)
+    single = arr.ndim == 2
+    if single:
+        arr = arr[None, ...]
+    N, T, _ = arr.shape
+    n_tail = int(max(1, min(n_tail, T)))
+    vis = None if visibility is None else np.asarray(visibility, dtype=bool)
+    if vis is not None and vis.ndim == 1:
+        vis = vis[None, ...]
 
-    N, T, _ = tracks.shape
-    del T
-    labels = np.full(N, -1, dtype=np.int32)
-    vis_frac = visibility.mean(axis=1)
-    disp = tracks[:, -1] - tracks[:, 0]
-    path = np.linalg.norm(np.diff(tracks, axis=1), axis=2).sum(axis=1)
-    path = np.where(visibility[:, 1:].sum(axis=1) > 0, path, 0.0)
-
-    keep = (vis_frac >= min_visibility) & (path >= min_path_px)
-    if keep.sum() < max(n_clusters, 2):
-        keep = path >= (min_path_px * 0.25)
-    idx = np.flatnonzero(keep)
-    if len(idx) == 0:
-        return labels
-
-    h = max(float(tracks[:, :, 1].max()), 1.0)
-    w = max(float(tracks[:, :, 0].max()), 1.0)
-    feats = np.concatenate(
-        [
-            disp[idx] / np.array([w, h], dtype=np.float32),
-            tracks[idx, 0] / np.array([w, h], dtype=np.float32),
-            tracks[idx, -1] / np.array([w, h], dtype=np.float32),
-            (path[idx] / max(w, h))[:, None],
-        ],
-        axis=1,
-    ).astype(np.float32)
-
-    k = int(min(n_clusters, len(idx)))
-    sub = _kmeans_torch(feats, k, device=device)
-    labels[idx] = sub.astype(np.int32)
-    return labels
-
-
-def pick_object_cluster(
-    tracks: np.ndarray,
-    visibility: np.ndarray,
-    labels: np.ndarray,
-) -> int:
-    """Choose cluster with largest total path among non-rejected points."""
-    path = np.linalg.norm(np.diff(tracks, axis=1), axis=2).sum(axis=1)
-    best_c, best_score = -1, -1.0
-    for c in sorted(set(labels.tolist())):
-        if c < 0:
-            continue
-        m = labels == c
-        score = float(path[m].sum() * visibility[m].mean())
-        if score > best_score:
-            best_score = score
-            best_c = c
-    if best_c < 0:
-        raise ValueError("no valid motion cluster found")
-    return best_c
-
-
-def select_active_indices(
-    tracks: np.ndarray,
-    visibility: np.ndarray,
-    labels: np.ndarray,
-    cluster_id: int,
-    max_points: int = 12,
-    min_visibility: float = 0.4,
-) -> np.ndarray:
-    mask = (labels == cluster_id) & (visibility.mean(axis=1) >= min_visibility)
-    cand = np.flatnonzero(mask)
-    if len(cand) == 0:
-        cand = np.flatnonzero(labels == cluster_id)
-    if len(cand) == 0:
-        raise ValueError("no candidates in object cluster")
-
-    # Prefer points visible at the end
-    end_vis = visibility[cand, -1]
-    order = np.argsort(-end_vis.astype(np.float32))
-    cand = cand[order]
-
-    # Greedy farthest-point on start positions for spatial diversity
-    selected: list[int] = []
-    start_uv = tracks[cand, 0]
-    remaining = list(range(len(cand)))
-    # seed: most visible at end
-    selected.append(remaining.pop(0))
-    while remaining and len(selected) < max_points:
-        sel_uv = start_uv[selected]
-        best_j, best_d = remaining[0], -1.0
-        for j in remaining:
-            d = float(np.linalg.norm(start_uv[j] - sel_uv, axis=1).min())
-            if d > best_d:
-                best_d = d
-                best_j = j
-        remaining.remove(best_j)
-        selected.append(best_j)
-    return cand[np.asarray(selected, dtype=np.int64)]
-
-
-def goals_from_tracks(
-    tracks: np.ndarray,
-    visibility: np.ndarray,
-    active: np.ndarray,
-) -> np.ndarray:
-    """goal_i = last visible position near segment end. Shape [M,2]."""
-    goals = np.zeros((len(active), 2), dtype=np.float32)
-    T = tracks.shape[1]
-    for j, i in enumerate(active):
-        vis = visibility[i]
-        # Prefer true last frame; else last visible
-        if vis[-1]:
-            goals[j] = tracks[i, -1]
-        else:
-            vis_idx = np.flatnonzero(vis)
-            if len(vis_idx) == 0:
-                goals[j] = tracks[i, T - 1]
+    out = np.zeros((N, 2), dtype=np.float32)
+    for i in range(N):
+        tail = arr[i, -n_tail:]
+        if vis is not None:
+            v = vis[i, -n_tail:]
+            if np.any(v):
+                pts = tail[v]
             else:
-                goals[j] = tracks[i, int(vis_idx[-1])]
-    return goals
-
-
-def aggregate_goals_median(goal_list: list[np.ndarray]) -> np.ndarray:
-    stacked = np.stack(goal_list, axis=0)
-    return np.median(stacked, axis=0).astype(np.float32)
+                # no visible in tail — use last visible in full track, else last frame
+                full_v = np.flatnonzero(vis[i])
+                if len(full_v):
+                    pts = arr[i, int(full_v[-1])][None, :]
+                else:
+                    pts = tail[-1:]
+        else:
+            pts = tail
+        out[i] = np.median(pts, axis=0)
+    return out[0] if single else out
 
 
 # ---------------------------------------------------------------------------
-# Visual servoing (4-DoF) + eye-in-hand mapping
+# Eye-in-hand mapping
 # ---------------------------------------------------------------------------
-
-
-def normalize_uv(points_uv: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Pixel (u,v) → roughly centered normalized coords for the Jacobian."""
-    pts = np.asarray(points_uv, dtype=np.float64).reshape(-1, 2)
-    u = (pts[:, 0] - 0.5 * width) / max(width, 1)
-    v = (pts[:, 1] - 0.5 * height) / max(height, 1)
-    return np.stack([u, v], axis=1)
-
-
-def build_jacobians(uv_norm: np.ndarray) -> np.ndarray:
-    """Stack 2x4 Jacobians for N points → [2N, 4]."""
-    uv = np.asarray(uv_norm, dtype=np.float64).reshape(-1, 2)
-    blocks = []
-    for u, v in uv:
-        blocks.append(
-            np.array(
-                [
-                    [1.0, 0.0, -u, -v],
-                    [0.0, 1.0, -v, u],
-                ],
-                dtype=np.float64,
-            )
-        )
-    return np.vstack(blocks)
-
-
-def solve_visual_servo(
-    points_uv: np.ndarray,
-    goals_uv: np.ndarray,
-    width: int,
-    height: int,
-    gain: float = 0.5,
-) -> np.ndarray:
-    """Return xi = [X_dot, Y_dot, Z_dot, Rz_dot] in camera (OpenCV) frame units."""
-    pts = np.asarray(points_uv, dtype=np.float64).reshape(-1, 2)
-    goals = np.asarray(goals_uv, dtype=np.float64).reshape(-1, 2)
-    err = gain * (goals - pts)
-    # Normalize error into same units as Jacobian coords
-    dp = np.empty(err.size, dtype=np.float64)
-    dp[0::2] = err[:, 0] / max(width, 1)
-    dp[1::2] = err[:, 1] / max(height, 1)
-    uv = normalize_uv(pts, width, height)
-    J = build_jacobians(uv)
-    xi, *_ = np.linalg.lstsq(J, dp, rcond=None)
-    return xi.astype(np.float64)
 
 
 def clamp_delta(

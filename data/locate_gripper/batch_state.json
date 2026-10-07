@@ -1,0 +1,14 @@
+{
+  "next_episode": 3857,
+  "total_images_saved": 337,
+  "batches_completed": 84,
+  "repo_id": "felsager/community_dataset_v3_ee_smolVLA",
+  "cameras": "top,side",
+  "stride": 400,
+  "batch_size": 4,
+  "last_episodes": [
+    3856
+  ],
+  "frame_offset": 24720,
+  "timestamps_per_episode": 2
+}

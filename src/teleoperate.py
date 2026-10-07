@@ -4,7 +4,6 @@ os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
 
 import time
 
-import cv2
 import numpy as np
 import pygame
 from lerobot.cameras.opencv import OpenCVCameraConfig
@@ -29,7 +28,7 @@ def main():
     #---- FOLLOWER ------
     camera_config = {"camera1": OpenCVCameraConfig(index_or_path=0, width=640, height=480, fps=FPS),}
     robot_config = SO100FollowerConfig(
-        port="/dev/tty.usbmodem5B3E0903291",
+        port="COM3",
         id="my_awesome_follower_arm",
         cameras=camera_config,
         use_degrees=True,
@@ -41,7 +40,7 @@ def main():
 
     #----- CONTROLLER -------
     # Switch in controllers.py: ControllerType.XBOX or ControllerType.SO100_LEADER
-    controller = make_controller(CONTROLLER, robot)
+    controller = make_controller(CONTROLLER, robot, 'COM4', 'my_awesome_leader_arm')
 
 
 
@@ -112,7 +111,7 @@ def main():
             robot.disconnect()
         except Exception as exc:
             print(f"Robot disconnect failed (motors may need a power cycle): {exc}")
-        cv2.destroyAllWindows()
+        pygame.quit()
 
 
 if __name__ == "__main__":

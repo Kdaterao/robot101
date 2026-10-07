@@ -1,0 +1,12 @@
+{
+  "repo_id": "kdaterao/so101_locate_gripper",
+  "n_labels": 290,
+  "n_images": 288,
+  "files": [
+    "images/**",
+    "labels.jsonl",
+    "README.md",
+    "locate_sft.jsonl",
+    "recipe.json"
+  ]
+}

@@ -85,6 +85,25 @@ def quat_angular_distance_deg(q_a, q_b) -> float:
     return float(np.rad2deg(2.0 * np.arccos(min(1.0, dot))))
 
 
+def quat_slerp_wxyz(q0, q1, t: float) -> np.ndarray:
+    """Spherical linear interpolation of MuJoCo wxyz quaternions. ``t`` in [0,1]."""
+    q0 = normalize_quat_wxyz(q0)
+    q1 = normalize_quat_wxyz(q1)
+    t = float(np.clip(t, 0.0, 1.0))
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    if dot > 0.9995:
+        return normalize_quat_wxyz(q0 + t * (q1 - q0))
+    theta_0 = float(np.arccos(min(1.0, dot)))
+    sin_0 = float(np.sin(theta_0))
+    theta = theta_0 * t
+    s0 = float(np.sin(theta_0 - theta) / sin_0)
+    s1 = float(np.sin(theta) / sin_0)
+    return normalize_quat_wxyz(s0 * q0 + s1 * q1)
+
+
 def T_from_R_t(R, t) -> np.ndarray:
     T = np.eye(4)
     T[:3, :3] = np.asarray(R, dtype=float).reshape(3, 3)

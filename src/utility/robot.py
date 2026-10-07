@@ -9,12 +9,12 @@ from lerobot.datasets import LeRobotDataset
 FPS = 30
 
 NEUTRAL_POS = {
-    "shoulder_pan.pos": -12.92,
-    "shoulder_lift.pos": -1.41,
-    "elbow_flex.pos": 16.53,
-    "wrist_flex.pos": 5.01,
-    "wrist_roll.pos": -0.22,
-    "gripper.pos": 3.46,
+  "shoulder_pan.pos": -6.29,
+  "shoulder_lift.pos": -33.63,
+  "elbow_flex.pos": 23.38,
+  "wrist_flex.pos": 80.0,
+  "wrist_roll.pos": 8.75,
+  "gripper.pos": 98,
 }
 
 REST_POSE = {

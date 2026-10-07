@@ -1,0 +1,20 @@
+{
+  "num_frames": 381,
+  "events": [
+    {
+      "frame": 140,
+      "type": "manual",
+      "gripper": 79.78508758544922
+    },
+    {
+      "frame": 238,
+      "type": "manual",
+      "gripper": 79.78508758544922
+    },
+    {
+      "frame": 289,
+      "type": "grasp",
+      "gripper": 79.65077209472656
+    }
+  ]
+}

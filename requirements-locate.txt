@@ -1,0 +1,27 @@
+# Lean deps for SO-101 LocateAnything / Florence-2 / locate_gripper / HF preprocess.
+# Install AFTER torch (see packages-locate.sh). No hashes = fast resolve.
+#
+#   bash packages-locate.sh
+#   # or manually:
+#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   uv pip install -e ./lerobot -e ./tapnet --no-deps
+#   uv pip install -r requirements-locate.txt
+
+numpy>=1.26
+opencv-python>=4.8
+opencv-python-headless>=4.8
+Pillow>=10.0
+pygame>=2.5
+dm-tree>=0.1.8
+einops>=0.7
+tqdm>=4.66
+typing_extensions>=4.8
+huggingface_hub>=0.26
+datasets>=3.0
+transformers>=4.45
+accelerate>=1.0
+safetensors>=0.4
+timm>=0.9
+av>=12.0
+pyarrow>=15.0
+scipy>=1.11
