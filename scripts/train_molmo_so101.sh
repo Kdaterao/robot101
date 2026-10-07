@@ -54,8 +54,9 @@ from pathlib import Path
 repo = Path(sys.argv[1])
 data_init = repo / "olmo/data/__init__.py"
 launcher = repo / "launch_scripts/train_multitask_model.py"
+trainer = repo / "scripts/train.py"
 adapter = repo / "olmo/data/so101_point_dataset.py"
-if not data_init.is_file() or not launcher.is_file():
+if not data_init.is_file() or not launcher.is_file() or not trainer.is_file():
     raise SystemExit(f"Not an AllenAI Molmo training checkout: {repo}")
 
 adapter.write_text('''"""SO-101 point annotations in the Molmo training example format."""
@@ -141,6 +142,24 @@ else:
         raise SystemExit(f"Could not find expected Molmo mixture point in {launcher}")
     launcher_text = launcher_text.replace(branch_end, branch + branch_end, 1)
 launcher.write_text(launcher_text, encoding="utf-8")
+
+trainer_text = trainer.read_text(encoding="utf-8")
+old_checkpoint_load = (
+    '                state_dict = torch.load(join(cfg.initial_model_checkpoint, "model.pt"), map_location="cpu")' + chr(10)
+    + '                olmo_model.load_state_dict(state_dict)' + chr(10)
+    + '                del state_dict'
+)
+memory_efficient_load = (
+    '                checkpoint_file = join(cfg.initial_model_checkpoint, "model.pt")' + chr(10)
+    + '                state_dict = torch.load(checkpoint_file, map_location="cpu", mmap=True, weights_only=True)' + chr(10)
+    + '                olmo_model.load_state_dict(state_dict, assign=True)' + chr(10)
+    + '                del state_dict'
+)
+if old_checkpoint_load in trainer_text:
+    trainer_text = trainer_text.replace(old_checkpoint_load, memory_efficient_load, 1)
+elif memory_efficient_load not in trainer_text:
+    raise SystemExit(f"Could not find the expected Molmo checkpoint loader in {trainer}")
+trainer.write_text(trainer_text, encoding="utf-8")
 print(f"Installed SO-101 point adapter in {repo}")
 PY
 python3 -m pip install --upgrade pip
@@ -199,6 +218,7 @@ torchrun --standalone --nproc-per-node=1 \
   --save_interval_unsharded="${MAX_DURATION}" \
   --eval_interval=-1 \
   --inf_eval_interval=-1 \
+  --data.num_workers=0 \
   --model.max_crops=1 \
   --ft_llm=false \
   --ft_vit=false \
