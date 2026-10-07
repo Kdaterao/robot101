@@ -147,6 +147,12 @@ def main() -> None:
     converted = {hf_key(name): name for name in base_shapes}
     if len(converted) != len(base_shapes):
         raise ValueError("Duplicate names after converting model parameters")
+    # Native SFT checkpoints can tie the output head to the token embedding.
+    # AllenAI's HF converter materializes that embedding as lm_head.weight
+    # because the HF Molmo2 configuration uses tie_word_embeddings=False.
+    if "lm_head.weight" not in converted and "transformer.wte.embedding" in base_shapes:
+        converted["lm_head.weight"] = "transformer.wte.embedding"
+        print("Materializing tied token embeddings as lm_head.weight", flush=True)
     expected = set(reference_index["weight_map"])
     actual = set(converted)
     if expected != actual:
