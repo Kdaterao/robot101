@@ -12,6 +12,8 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 from huggingface_hub import HfApi, snapshot_download
 from safetensors.torch import save_file
 
@@ -59,6 +61,46 @@ def load_connector(path: Path) -> dict:
                 dist.destroy_process_group()
 
 
+def open_base_checkpoint(root: Path):
+    """Return parameter shapes and a lazy reader for native Molmo2 weights."""
+    unsharded = list(root.rglob("model.pt"))
+    sharded = list(root.rglob(".metadata"))
+    if len(unsharded) == 1:
+        source = unsharded[0]
+        print(f"Memory-mapping {source}", flush=True)
+        state = torch.load(source, map_location="cpu", weights_only=True, mmap=True)
+        shapes = {name: tensor.shape for name, tensor in state.items()}
+        return source, shapes, lambda name: state[name]
+    if not unsharded and len(sharded) == 1:
+        source = sharded[0].parent
+        reader = dcp.FileSystemReader(str(source))
+        metadata = reader.read_metadata()
+        specs = {
+            name.removeprefix("model."): spec
+            for name, spec in metadata.state_dict_metadata.items()
+            if name.startswith("model.") and isinstance(spec, TensorStorageMetadata)
+        }
+        if not specs:
+            raise ValueError(f"No model tensors in distributed checkpoint {source}")
+        print(f"Reading {len(specs)} tensors from sharded checkpoint {source}", flush=True)
+
+        def read(name):
+            spec = specs[name]
+            tensor = torch.empty(spec.size, dtype=spec.properties.dtype, device="cpu")
+            # Request only this parameter. PyTorch reassembles its original
+            # distributed shards without loading the rest of the model/optimizer.
+            state = {"model": {name: tensor}}
+            dcp.load(state, storage_reader=reader)
+            return state["model"][name]
+
+        return source, {name: spec.size for name, spec in specs.items()}, read
+    raise ValueError(
+        f"Expected one model.pt or one distributed .metadata under {root}; "
+        f"found {len(unsharded)} model.pt and {len(sharded)} .metadata files. "
+        "Use --base-checkpoint to select the specific checkpoint directory."
+    )
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     work = root / "molmo2_so101_run"
@@ -74,24 +116,17 @@ def main() -> None:
 
     if not args.connector.is_file():
         raise FileNotFoundError(args.connector)
-    candidates = list(args.base_checkpoint.rglob("model.pt"))
-    if len(candidates) != 1:
-        raise ValueError(f"Expected one base model.pt under {args.base_checkpoint}; found {len(candidates)}")
     output = args.output_dir.resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"Export directory is not empty: {output}; choose a new --output-dir")
 
     connector = load_connector(args.connector)
-    print(f"Loading base checkpoint {candidates[0]} with memory mapping", flush=True)
-    base = torch.load(candidates[0], map_location="cpu", weights_only=True, mmap=True)
-    if not isinstance(base, dict):
-        raise ValueError("Expected a base model state dictionary")
+    base_source, base_shapes, read_base = open_base_checkpoint(args.base_checkpoint)
     for name, tensor in connector.items():
-        if name not in base:
+        if name not in base_shapes:
             raise ValueError(f"Connector parameter absent from base model: {name}")
-        if tensor.shape != base[name].shape:
+        if tensor.shape != base_shapes[name]:
             raise ValueError(f"Connector shape mismatch for {name}")
-        base[name] = tensor
 
     # Download only HF configs, tokenizer, processor and custom model code.
     # All actual weights come from the exact checkpoint used for training.
@@ -100,8 +135,8 @@ def main() -> None:
         allow_patterns=["*.json", "*.py", "*.txt", "*.jinja", "LICENSE*"],
     ))
     reference_index = json.loads((metadata / "model.safetensors.index.json").read_text())
-    converted = {hf_key(name): tensor for name, tensor in base.items()}
-    if len(converted) != len(base):
+    converted = {hf_key(name): name for name in base_shapes}
+    if len(converted) != len(base_shapes):
         raise ValueError("Duplicate names after converting model parameters")
     expected = set(reference_index["weight_map"])
     actual = set(converted)
@@ -140,7 +175,8 @@ def main() -> None:
         shard, shard_bytes = {}, 0
         gc.collect()
 
-    for name, tensor in converted.items():
+    for name, native_name in converted.items():
+        tensor = connector[native_name] if native_name in connector else read_base(native_name)
         dtype = torch.bfloat16 if tensor.is_floating_point() else tensor.dtype
         size = tensor.numel() * torch.empty((), dtype=dtype).element_size()
         if shard_bytes + size > shard_limit:
@@ -148,6 +184,7 @@ def main() -> None:
         shard[name] = tensor.to(dtype=dtype).contiguous()
         shard_bytes += size
         total_bytes += size
+        del tensor
     flush()
     for number, old in enumerate(shard_files, 1):
         new = f"model-{number:05d}-of-{len(shard_files):05d}.safetensors"
@@ -157,7 +194,7 @@ def main() -> None:
         "metadata": {"total_size": total_bytes}, "weight_map": weight_map,
     }, indent=2) + "\n")
     (output / "export_info.json").write_text(json.dumps({
-        "base_checkpoint": str(candidates[0]), "connector": str(args.connector.resolve()),
+        "base_checkpoint": str(base_source), "connector": str(args.connector.resolve()),
         "hf_metadata_revision": metadata.name, "merged_parameters": sorted(connector),
         "dtype": "bfloat16",
     }, indent=2) + "\n")

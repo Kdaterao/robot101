@@ -279,7 +279,9 @@ python3 scripts/export_molmo2_so101.py
 hf upload kdaterao/so101-molmo2-4b-gripper molmo2_so101_run/hf_model .
 ```
 
-The exporter reads the original `model.pt` with memory mapping, merges all
+The exporter reads an original `model.pt` with memory mapping or streams
+parameters from the native distributed `model_and_optim/.metadata` checkpoint,
+merges all
 tuned tensors (including additional token embeddings), and writes BF16
 safetensors in approximately 2 GB shards. It downloads only the official
 Hugging Face tokenizer, processor, configs, and custom Python code. The full
