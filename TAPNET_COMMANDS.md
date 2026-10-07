@@ -300,6 +300,19 @@ once at the end and skips full-model and optimizer checkpoints. Start with 500
 steps; set `SO101_MAX_DURATION` to change that. If the dataset is private, set
 `HF_TOKEN` before running.
 
+To publish processed examples as a Hugging Face dataset with embedded images
+and `train`/`validation` splits, authenticate with a write token and run:
+
+```bash
+bash scripts/prepare_molmo2_so101_data.sh
+```
+
+By default it creates the private dataset
+`kdaterao/so101_molmo2_gripper_preprocessed`. Set
+`SO101_PREPROCESSED_DATASET_REPO=OWNER/NAME` to choose another destination, or
+set `SO101_PREPROCESSED_DATASET_PUBLIC=1` to create a public dataset. The local
+JSONL files remain the inputs used by the training adapter.
+
 Useful overrides:
 
 ```bash

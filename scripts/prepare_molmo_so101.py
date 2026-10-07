@@ -18,6 +18,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument(
+        "--push-to-hub",
+        action="store_true",
+        help="Upload processed train/validation splits with embedded images",
+    )
+    parser.add_argument(
+        "--hub-repo-id",
+        default="kdaterao/so101_molmo2_gripper_preprocessed",
+        help="Destination dataset repository (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        help="Create the destination dataset as public (private by default)",
+    )
     return parser.parse_args()
 
 
@@ -116,6 +131,7 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     split_counts: dict[str, int] = {}
+    split_records: dict[str, list[dict]] = {}
     for split in ("train", "validation"):
         split_rows = [
             row
@@ -127,6 +143,7 @@ def main() -> None:
             for row in split_rows:
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
         split_counts[split] = len(split_rows)
+        split_records[split] = split_rows
 
     if not validation_episodes:
         print("WARNING: fewer than two labeled episodes; validation split is empty.")
@@ -137,6 +154,45 @@ def main() -> None:
     )
     print(f"Prepared data: {args.output_dir}")
     print(f"Image cache: {image_dir}")
+
+    if args.push_to_hub:
+        try:
+            from datasets import Dataset, DatasetDict, Features, Image, Value
+        except ImportError as exc:
+            raise SystemExit(
+                "Uploading preprocessed data requires Hugging Face Datasets. "
+                "Install it with: python3 -m pip install datasets"
+            ) from exc
+
+        features = Features(
+            {
+                "image": Image(),
+                "point_xy_100": [Value("float32")],
+                "label": Value("string"),
+                "episode": Value("int64"),
+                "camera": Value("string"),
+                "source_image": Value("string"),
+            }
+        )
+        hub_splits = DatasetDict(
+            {
+                split: Dataset.from_list(
+                    [
+                        {**row, "image": {"path": row["image"], "bytes": None}}
+                        for row in rows
+                    ],
+                    features=features,
+                )
+                for split, rows in split_records.items()
+            }
+        )
+        hub_splits.push_to_hub(
+            args.hub_repo_id,
+            private=not args.public,
+            embed_external_files=True,
+            commit_message="Upload preprocessed SO-101 Molmo2 point data",
+        )
+        print(f"Uploaded processed dataset: https://huggingface.co/datasets/{args.hub_repo_id}")
 
 
 if __name__ == "__main__":
