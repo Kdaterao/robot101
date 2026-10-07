@@ -30,17 +30,22 @@ class DecodeTests(TestCase):
         cam = 'wrist'
         key = 'observation.images.wrist'
         rows = [dict(timestamp=torch.tensor(i/30), episode_index=torch.tensor(7),
-                     task_index=torch.tensor(0), **{
+                     task_index=torch.tensor(0), source_dataset_index=torch.tensor(i), **{
                          'observation.state': torch.arange(8), 'action': torch.arange(8),
                          'observation.images.wrist_padding_mask': torch.tensor([i != 2])})
                 for i in range(8)]
-        meta = SimpleNamespace(features={key: {}}, video_keys=[key],
+        meta = SimpleNamespace(features={key: {}, 'source_dataset_index': {'dtype': 'int64', 'shape': [1]},
+                                             'timestamp': {'dtype': 'float32', 'shape': [1]}}, video_keys=[key],
                                tasks=SimpleNamespace(iloc=[SimpleNamespace(name='pick cup')]),
                                episodes={7: {f'videos/{key}/from_timestamp': 10.0}},
                                get_video_file_path=lambda episode, camera: Path('video.mp4'))
         ds = SimpleNamespace(hf_dataset=rows, meta=meta, root=Path('/tmp'), tolerance_s=.01)
         data = load_episode_metadata(ds, [cam, 'side'])
         self.assertEqual(data['tasks'], ['pick cup'] * 8)
+        self.assertEqual(set(data['extras'][0]), {'source_dataset_index'})
+        self.assertEqual(data['extras'][6]['source_dataset_index'].dtype, np.dtype('int64'))
+        self.assertEqual(data['extras'][6]['source_dataset_index'].shape, (1,))
+        self.assertEqual(data['extras'][6]['source_dataset_index'][0], 6)
         self.assertFalse(data['masks'][cam][2])
         self.assertFalse(data['masks']['side'].any())
         calls = []

@@ -21,6 +21,23 @@ def _frame_batches(indices, batch_size):
         yield batch
 
 
+def source_auxiliary_fields(features, cameras, default_features):
+    """Retain source fields that the writer does not generate or render."""
+    managed = {'observation.state', 'action', 'task', *default_features}
+    for camera in cameras:
+        managed.update({_cam_key(camera), f'{_cam_key(camera)}_padding_mask'})
+    return {name: feature for name, feature in features.items() if name not in managed}
+
+
+def _source_value(value, feature):
+    dtype = feature['dtype']
+    if dtype in {'string', 'language'}:
+        return value
+    if dtype in {'image', 'video'}:
+        raise ValueError('Additional camera streams must be included in the preprocessing camera list')
+    return _as_numpy(value).astype(np.dtype(dtype)).reshape(tuple(feature['shape'])).copy()
+
+
 def load_episode_metadata(ds, cameras):
     """Read state/actions/task text without triggering per-frame video seeks."""
     start = perf_counter()
@@ -28,9 +45,15 @@ def load_episode_metadata(ds, cameras):
     n = len(rows)
     if not n:
         raise ValueError('empty episode')
-    states, actions, tasks, timestamps, episodes = [], [], [], [], []
+    from lerobot.utils.constants import DEFAULT_FEATURES
+    auxiliary = source_auxiliary_fields(ds.meta.features, cameras, DEFAULT_FEATURES)
+    states, actions, tasks, timestamps, episodes, extras = [], [], [], [], [], []
     masks = {cam: [] for cam in cameras}
     for row in rows:
+        missing = set(auxiliary) - set(row)
+        if missing:
+            raise ValueError(f'Source row is missing required features: {sorted(missing)}')
+        extras.append({name: _source_value(row[name], feature) for name, feature in auxiliary.items()})
         states.append(_as_numpy(row['observation.state']).astype(np.float32).reshape(-1))
         actions.append(_as_numpy(row['action']).astype(np.float32).reshape(-1))
         timestamps.append(float(_as_numpy(row['timestamp']).item()))
@@ -49,7 +72,7 @@ def load_episode_metadata(ds, cameras):
                   gripper=states[:, GRIPPER_INDEX] if states.shape[1] > GRIPPER_INDEX else np.zeros(n, np.float32),
                   action_gripper=actions[:, GRIPPER_INDEX] if actions.shape[1] > GRIPPER_INDEX else np.zeros(n, np.float32),
                   masks={cam: np.asarray(mask, dtype=bool) for cam, mask in masks.items()},
-                  frames={}, timestamps=timestamps, episode_index=episodes[0])
+                  frames={}, timestamps=timestamps, episode_index=episodes[0], extras=extras)
     print(f'  metadata: {n} frames in {perf_counter()-start:.1f}s', flush=True)
     return result
 

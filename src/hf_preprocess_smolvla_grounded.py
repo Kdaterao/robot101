@@ -693,6 +693,7 @@ def main() -> None:
         for t in range(n):
             si = next((i for i, st in enumerate(stages) if st.start <= t <= st.end), max(0, len(stages) - 1))
             frame = {
+                **data["extras"][t],
                 "observation.state": data["states"][t],
                 "action": data["actions"][t],
                 "task": data["tasks"][t] or task or "molmo_point_grounded_preprocess",

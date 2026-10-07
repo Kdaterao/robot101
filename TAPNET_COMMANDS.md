@@ -469,3 +469,8 @@ Regression checks for sparse/batched decoding and selected-track reuse:
 ```bash
 python tests/test_grounded_preprocess_speed.py
 ```
+
+Source fields such as `source_dataset_index` are retained in every output frame
+with their declared dtype and shape. LeRobot generates new frame/episode indices
+for the destination. Required source fields are checked while loading metadata,
+before tracking begins, to avoid a late feature mismatch during video writing.
