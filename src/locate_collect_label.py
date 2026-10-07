@@ -21,6 +21,7 @@ DEFAULT_HF_PUSH_REPO = "kdaterao/so101_locate_gripper"
 DEFAULT_CAMERAS = ("top", "side")
 DEFAULT_PHRASE = "SO-101 gripper"
 POINT_LABELS_NAME = "point_labels.jsonl"
+SKIPPED_IMAGES_NAME = "skipped_images.jsonl"
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "locate_gripper"
 BATCH_STATE_NAME = "batch_state.json"
 
@@ -561,10 +562,42 @@ def _load_labeled_paths(labels_path: Path) -> set[str]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(row, dict):
+                continue
             img = row.get("image")
             if img:
                 labeled.add(img.replace("\\", "/"))
     return labeled
+
+
+def _record_skipped_path(skipped_path: Path, image: str) -> None:
+    """Persist a skipped image so later labeling batches omit it."""
+    normalized = image.replace("\\", "/")
+    if normalized in _load_labeled_paths(skipped_path):
+        return
+    skipped_path.parent.mkdir(parents=True, exist_ok=True)
+    with skipped_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"image": normalized}) + "\n")
+
+
+def _remove_skipped_path(skipped_path: Path, image: str) -> None:
+    """Remove a skipped marker when an image is subsequently labeled."""
+    if not skipped_path.is_file():
+        return
+    normalized = image.replace("\\", "/")
+    kept_lines: list[str] = []
+    with skipped_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                kept_lines.append(line)
+                continue
+            row_image = row.get("image", "") if isinstance(row, dict) else ""
+            if row_image.replace("\\", "/") != normalized:
+                kept_lines.append(line)
+    with skipped_path.open("w", encoding="utf-8") as f:
+        f.writelines(kept_lines)
 
 
 class PointLabeler:
@@ -584,9 +617,18 @@ class PointLabeler:
     def _clamp(self, x: int, y: int) -> tuple[int, int]:
         assert self.base is not None
         h, w = self.base.shape[:2]
-        # The label window is autosized to the native image dimensions, so HighGUI
-        # callback coordinates already refer to source-image pixels.
-        return max(0, min(w - 1, x)), max(0, min(h - 1, y))
+        # HighGUI mouse coordinates are in rendered-window pixels. Map them back
+        # to source pixels because display scaling (including HiDPI scaling) can
+        # make the rendered image differ from the source dimensions.
+        try:
+            _, _, display_w, display_h = cv2.getWindowImageRect(self.window)
+        except (AttributeError, cv2.error):
+            display_w, display_h = w, h
+        if display_w <= 0 or display_h <= 0:
+            display_w, display_h = w, h
+        image_x = int(round(x * w / display_w))
+        image_y = int(round(y * h / display_h))
+        return max(0, min(w - 1, image_x)), max(0, min(h - 1, image_y))
 
     def _redraw(self) -> None:
         assert self.base is not None
@@ -634,6 +676,7 @@ def run_label_ui(
     images_dir = out_dir / "images"
     # Keep legacy box annotations intact; point annotations have their own file.
     labels_path = out_dir / POINT_LABELS_NAME
+    skipped_path = out_dir / SKIPPED_IMAGES_NAME
     if not images_dir.is_dir():
         raise SystemExit(f"No images directory at {images_dir}. Run `sample`/`batch` first.")
 
@@ -646,15 +689,25 @@ def run_label_ui(
         return "empty"
 
     labeled = _load_labeled_paths(labels_path)
+    previously_skipped = _load_labeled_paths(skipped_path)
     if relabel_all:
         pending = images
         labeled = set()
+        previously_skipped = set()
     elif only_unlabeled:
-        pending = [p for p in images if f"images/{p.name}" not in labeled]
+        pending = [
+            p
+            for p in images
+            if f"images/{p.name}" not in labeled
+            and f"images/{p.name}" not in previously_skipped
+        ]
     else:
-        pending = images
+        pending = [p for p in images if f"images/{p.name}" not in previously_skipped]
 
-    print(f"Images: {len(images)} total, {len(pending)} to label, phrase={phrase!r}")
+    print(
+        f"Images: {len(images)} total, {len(pending)} to label, "
+        f"{len(previously_skipped)} previously skipped, phrase={phrase!r}"
+    )
     print("Click the center of the gripper jaws.")
     print("Controls: click=mark | s=save | n=skip | u=clear point | q=quit")
 
@@ -690,6 +743,8 @@ def run_label_ui(
                 print(f"Quit. saved={saved}, skipped={skipped}, remaining={len(pending) - i}")
                 return "quit"
             if key == ord("n"):
+                _record_skipped_path(skipped_path, rel)
+                previously_skipped.add(rel)
                 skipped += 1
                 i += 1
                 break
@@ -718,6 +773,8 @@ def run_label_ui(
                 }
                 with labels_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row) + "\n")
+                _remove_skipped_path(skipped_path, rel)
+                previously_skipped.discard(rel)
                 labeled.add(rel)
                 saved += 1
                 print(f"  saved point {row['point_xy']} -> {labels_path.name}")

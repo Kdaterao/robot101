@@ -62,7 +62,7 @@ python src/locate_collect_label.py sample --num-frames 4 --timestamps-per-episod
 python src/locate_collect_label.py label
 ```
 
-Controls while labeling: click to place/move point, `s` save, `n` skip, `u` clear, `q` quit (resume later). Point records go to `data/locate_gripper/point_labels.jsonl`.
+Controls while labeling: click to place/move point, `s` save, `n` skip, `u` clear, `q` quit (resume later). Point records go to `data/locate_gripper/point_labels.jsonl`. Skips are saved in `data/locate_gripper/skipped_images.jsonl` and filtered from later batches; `--relabel-all` intentionally includes them again. Clicks are mapped from the displayed image size to source-image pixels to account for display scaling.
 
 ```bash
 # 1b. Push point labels + images to Hugging Face (default: kdaterao/so101_locate_gripper)

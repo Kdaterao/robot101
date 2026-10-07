@@ -16,7 +16,9 @@ DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "locate_gripper"
 DEFAULT_REPO = "kdaterao/so101_locate_gripper"
 
 # Local-only cursor; do not upload by default.
-_SKIP_NAMES = frozenset({"batch_state.json", ".DS_Store", "Thumbs.db"})
+_SKIP_NAMES = frozenset(
+    {"batch_state.json", "skipped_images.jsonl", ".DS_Store", "Thumbs.db"}
+)
 
 
 def _count_labels(labels_path: Path) -> int:
