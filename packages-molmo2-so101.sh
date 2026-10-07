@@ -31,10 +31,11 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if [[ ! -x "${ROOT}/.venv-molmo2/bin/python" ]]; then
-  uv venv --python 3.12 "${ROOT}/.venv-molmo2"
+  uv venv --seed --python 3.12 "${ROOT}/.venv-molmo2"
 fi
 
 VENV_PYTHON="${ROOT}/.venv-molmo2/bin/python"
+uv pip install --python "${VENV_PYTHON}" pip
 MOLMO2_WORK="${SO101_MOLMO2_WORKDIR:-${ROOT}/molmo2_so101_run}"
 MOLMO2_REPO="${MOLMO2_REPO_ROOT:-${MOLMO2_WORK}/molmo2}"
 MOLMO2_REF="${SO101_MOLMO2_REF:-f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a}"
@@ -48,8 +49,13 @@ fi
 
 echo "Installing CUDA 13.0 PyTorch for the RTX A6000..."
 uv pip install --python "${VENV_PYTHON}" \
-  torch==2.10.0 torchvision==0.25.0 torchcodec==0.12.0 \
+  torch==2.10.0 torchvision==0.25.0 \
   --index-url https://download.pytorch.org/whl/cu130
+
+# Molmo2 SO-101 training uses images only. CPU TorchCodec avoids CUDA NPP
+# runtime-library requirements while retaining FFmpeg-backed CPU decoding.
+uv pip install --python "${VENV_PYTHON}" --reinstall --no-deps \
+  torchcodec==0.12.0 --index-url https://download.pytorch.org/whl/cpu
 
 echo "Installing the pinned Molmo2 training stack (includes datasets and HF Hub)..."
 uv pip install --python "${VENV_PYTHON}" -e "${MOLMO2_REPO}[train]"
@@ -70,7 +76,7 @@ print(f"GPU: {name}; VRAM: {memory:.1f} GiB")
 if "A6000" not in name:
     print("Warning: this VM is not reporting an RTX A6000.")
 print(f"datasets: {datasets.__version__}; huggingface_hub: {huggingface_hub.__version__}")
-print("torchcodec: import OK")
+print(f"torchcodec: {torchcodec.__version__}; import OK")
 PY
 
 echo

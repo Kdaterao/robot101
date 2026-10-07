@@ -58,7 +58,6 @@ PY
 
 mkdir -p "${WORK_ROOT}" "${MOLMO_DATA_DIR}"
 python3 -m pip install --upgrade pip
-python3 -m pip install torchcodec
 python3 -m pip install -e "${MOLMO2_REPO_ROOT}[train]"
 
 python3 "${REPO_ROOT}/scripts/install_molmo2_so101_adapter.py" --repo "${MOLMO2_REPO_ROOT}"
