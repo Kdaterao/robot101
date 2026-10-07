@@ -250,6 +250,18 @@ rendered into wrist and third-person heatmaps in the LeRobot output dataset.
 
 ## Fine-tune Molmo on SO-101 gripper points
 
+On a fresh Ubuntu Thunder Compute RTX A6000 VM, clone this repository and run
+the package setup once:
+
+```bash
+bash packages-molmo2-so101.sh
+source .venv-molmo2/bin/activate
+```
+
+It creates an isolated Python 3.12 environment, installs CUDA 13.0 PyTorch,
+TorchCodec, and the pinned Molmo2 training/data dependencies, then checks the
+GPU. Log in with `hf auth login` before publishing the processed dataset.
+
 For the current run, use the Molmo2-4B SFT checkpoint and the official Molmo2
 training repo. The launcher clones a pinned Molmo2 revision into its work
 directory, installs the SO-101 point dataset adapter, and runs a one-GPU
