@@ -126,6 +126,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
   --save_final_optim=false \
   --eval_interval=-1 \
   --inf_eval_interval=-1 \
+  --wandb=null \
   --compile=null \
   --compile_loss=false \
   --save_overwrite=true
