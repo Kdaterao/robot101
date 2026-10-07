@@ -31,6 +31,12 @@ def hf_key(name: str) -> str:
     return "model." + ".".join(parts)
 
 
+def unwrap_parameter_name(name: str) -> str:
+    """Remove training wrappers present in named_parameters() save hooks."""
+    wrappers = {"_checkpoint_wrapped_module", "_fsdp_wrapped_module", "_orig_mod"}
+    return ".".join(part for part in name.split(".") if part not in wrappers)
+
+
 def load_connector(path: Path) -> dict:
     # The training hook may have saved one-rank FSDP2 DTensors. A process group
     # is needed to deserialize their mesh; no model or GPU tensors are created.
@@ -50,11 +56,14 @@ def load_connector(path: Path) -> dict:
             for name, tensor in state.items():
                 if not isinstance(name, str) or not isinstance(tensor, torch.Tensor):
                     raise ValueError(f"Invalid connector entry: {name!r}")
+                clean_name = unwrap_parameter_name(name)
+                if clean_name in result:
+                    raise ValueError(f"Duplicate connector parameter after removing wrappers: {clean_name}")
                 if hasattr(tensor, "to_local"):
                     if tensor.to_local().shape != tensor.shape:
                         raise ValueError("Export requires the one-GPU connector, not a partial shard")
                     tensor = tensor.to_local()
-                result[name] = tensor.detach().cpu()
+                result[clean_name] = tensor.detach().cpu()
             return result
         finally:
             if owns_group:
