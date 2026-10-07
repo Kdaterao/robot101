@@ -8,7 +8,7 @@ set -euo pipefail
 #   source .venv-molmo2/bin/activate
 #   hf auth login
 #   bash scripts/prepare_molmo2_so101_data.sh
-#   bash scripts/train_molmo2_so101.sh
+# Run scripts/train_molmo2_so101.sh only when you intend to start a new fine-tune.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT}"
@@ -84,4 +84,4 @@ echo "Package setup complete. Next run:"
 echo "  source .venv-molmo2/bin/activate"
 echo "  hf auth login"
 echo "  bash scripts/prepare_molmo2_so101_data.sh"
-echo "  bash scripts/train_molmo2_so101.sh"
+echo "To start a new fine-tune, run: bash scripts/train_molmo2_so101.sh"

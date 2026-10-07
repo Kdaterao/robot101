@@ -260,7 +260,9 @@ source .venv-molmo2/bin/activate
 
 It creates an isolated Python 3.12 environment, installs CUDA 13.0 PyTorch,
 TorchCodec, and the pinned Molmo2 training/data dependencies, then checks the
-GPU. Log in with `hf auth login` before publishing the processed dataset.
+GPU. This only installs packages. Log in with `hf auth login` before publishing
+the processed dataset. The training command below starts a new fine-tune; it
+does not load the saved connector for inference.
 
 For the current run, use the Molmo2-4B SFT checkpoint and the official Molmo2
 training repo. The launcher clones a pinned Molmo2 revision into its work
