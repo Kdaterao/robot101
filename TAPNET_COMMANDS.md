@@ -261,11 +261,11 @@ bash scripts/train_molmo_so101.sh
 
 The command uses the label maker's default dataset, `kdaterao/so101_locate_gripper`.
 It downloads `point_labels.jsonl` and its referenced images, makes an
-episode-disjoint 90/10 train/validation split, downloads Molmo-7B-D-0924 and
-general PixMo point examples, and starts the native Molmo trainer with a
-50/50 general/SO-101 pointing mixture. It consumes user-clicked point labels;
-it does not reinterpret the bounding boxes in `labels.jsonl`. Checkpoints go
-under `molmo_so101_run/checkpoints/so101_molmo/` by default.
+episode-disjoint 90/10 train/validation split, downloads Molmo-7B-D-0924, and
+trains on the SO-101 points only. It does not download the unrelated general
+PixMo images. It consumes user-clicked point labels; it does not reinterpret
+the bounding boxes in `labels.jsonl`. Checkpoints go under
+`molmo_so101_run/checkpoints/so101_molmo/` by default.
 
 This is configured for one GPU and updates the vision-language connector while
 freezing the 7B language model and vision encoder to fit a more modest GPU. It
