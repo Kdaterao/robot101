@@ -8,9 +8,17 @@ source .venv/bin/activate
 hf auth login
 ```
 
-Installs CUDA torch, tapnet checkpoint, vendored lerobot/tapnet editables, and
-`requirements-locate.txt` (transformers / Florence-2 / OpenCV / pyav / hub).
-Does not replace `packages.sh` or `packages-tapnet-gpu.sh`.
+Installs CUDA torch, tapnet checkpoint, vendored lerobot/tapnet editables,
+`requirements-locate.txt`, **Eagle Embodied** (`third_party/Eagle`), and
+`requirements-locate-finetune.txt` (peft / deepspeed / sentencepiece / … for
+`locate_finetune.py train`). Does not replace `packages.sh` or `packages-tapnet-gpu.sh`.
+
+```bash
+# Fine-tune after setup (Eagle path printed by packages-locate.sh)
+python src/locate_finetune.py export
+python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --push-model-to-hub
+# if DeepSpeed fails: add --deepspeed none
+```
 
 ## A. Fine-tune LocateAnything on the SO-101 gripper
 
@@ -56,10 +64,10 @@ python src/locate_finetune.py export
 # Export + push in one shot:
 python src/locate_finetune.py export --push-to-hub
 
-# 3. Fine-tune (clone Eagle once first)
-# git clone https://github.com/NVlabs/Eagle.git
-python src/locate_finetune.py train --eagle-root path/to/Eagle/Embodied --dry-run
-python src/locate_finetune.py train --eagle-root path/to/Eagle/Embodied
+# 3. Fine-tune (Eagle cloned by packages-locate.sh into third_party/Eagle)
+python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --dry-run
+python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --push-model-to-hub
+# python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --deepspeed none --push-model-to-hub
 
 # 4. Push fine-tuned ckpt to Hub (only the dataset was pushed before — not the model)
 python src/locate_finetune.py push-model --output-dir work_dirs/locate_so101_gripper
