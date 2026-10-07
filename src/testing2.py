@@ -14,13 +14,16 @@ from tapnet.torch.tapir_model import QueryFeatures
 
 from florence2_worker import (
     DEFAULT_FLORENCE_MODEL,
+    DEFAULT_LOCATE_BASE,
+    DEFAULT_LOCATE_HF,
     boxes_from_ground_result,
     load_locator,
+    resolve_locate_model,
 )
 from tapnet_utils import BootsTAPIR, DEFAULT_CHECKPOINT, points_heatmap
 
-DEFAULT_LOCATE_MODEL = "nvidia/LocateAnything-3B"
 DEFAULT_LOCATOR = "locateanything"
+DEFAULT_PROMPT = "SO-101 gripper"
 
 
 def expand_polygon(poly: np.ndarray, pad: float) -> np.ndarray:
@@ -368,8 +371,13 @@ def parse_args():
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument(
         "--prompt",
-        default=None,
-        help="Referring phrase (seeds TapNet on first frame; L re-grounds)",
+        default=DEFAULT_PROMPT,
+        help=f"Referring phrase (default: {DEFAULT_PROMPT!r}; L re-grounds)",
+    )
+    parser.add_argument(
+        "--no-locate",
+        action="store_true",
+        help="Disable grounding; click-to-track only",
     )
     parser.add_argument(
         "--locator",
@@ -381,8 +389,9 @@ def parse_args():
         "--locate-model",
         default=None,
         help=(
-            "Model path/id for --locator "
-            f"(default: {DEFAULT_LOCATE_MODEL} or {DEFAULT_FLORENCE_MODEL})"
+            "Model path/id for --locator. LocateAnything resolves: "
+            f"local work_dirs → Hub {DEFAULT_LOCATE_HF} → {DEFAULT_LOCATE_BASE}; "
+            f"Florence default {DEFAULT_FLORENCE_MODEL}"
         ),
     )
     parser.add_argument(
@@ -399,14 +408,12 @@ def main():
     locate_points = (
         args.locate_points if args.locate_points is not None else args.num_points
     )
-    use_locate = args.prompt is not None or args.locate_model is not None
-    if args.locate_model:
-        locate_model = args.locate_model
-    elif args.locator == "florence2":
-        locate_model = DEFAULT_FLORENCE_MODEL
+    locate_phrase = (args.prompt or "").strip() or None
+    use_locate = (not args.no_locate) and bool(locate_phrase)
+    if args.locator == "florence2":
+        locate_model = args.locate_model or DEFAULT_FLORENCE_MODEL
     else:
-        locate_model = DEFAULT_LOCATE_MODEL
-    locate_phrase = args.prompt
+        locate_model = resolve_locate_model(args.locate_model)
 
     print("Loading BootsTAPIR...")
     tapir = BootsTAPIR(

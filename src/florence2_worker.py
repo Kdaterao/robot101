@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -15,6 +16,40 @@ from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 DEFAULT_FLORENCE_MODEL = "microsoft/Florence-2-large"
+# Preferred Hub id after you push a fine-tune (may not exist yet).
+DEFAULT_LOCATE_HF = "kdaterao/locate_so101_gripper"
+DEFAULT_LOCATE_BASE = "nvidia/LocateAnything-3B"
+_DEFAULT_LOCATE_LOCAL = (
+    Path(__file__).resolve().parent.parent / "work_dirs" / "locate_so101_gripper"
+)
+
+
+def resolve_locate_model(explicit: str | None = None) -> str:
+    """Pick fine-tuned Hub/local ckpt if present, else NVIDIA base.
+
+    Order: explicit arg → local ``work_dirs/locate_so101_gripper`` →
+    Hub ``kdaterao/locate_so101_gripper`` (if reachable) → ``nvidia/LocateAnything-3B``.
+    """
+    if explicit:
+        return str(explicit)
+
+    local = _DEFAULT_LOCATE_LOCAL
+    if (local / "config.json").is_file() or (local / "adapter_config.json").is_file():
+        return str(local.resolve())
+
+    try:
+        from huggingface_hub import model_info
+
+        model_info(DEFAULT_LOCATE_HF)
+        return DEFAULT_LOCATE_HF
+    except Exception:
+        pass
+
+    return DEFAULT_LOCATE_BASE
+
+
+# Back-compat alias used by other scripts.
+DEFAULT_LOCATE_MODEL = DEFAULT_LOCATE_HF
 
 # Open-vocab phrase grounding (closest to LocateAnything ground_single).
 TASK_OPEN_VOCAB = "<OPEN_VOCABULARY_DETECTION>"
@@ -245,7 +280,7 @@ def load_locator(name: str, model_path: str | None = None, device: str = "cuda")
     if key in ("locateanything", "locate", "la"):
         from locateanything_worker import LocateAnythingWorker
 
-        path = model_path or "nvidia/LocateAnything-3B"
+        path = resolve_locate_model(model_path)
         print(f"Loading LocateAnything from {path}...")
         return LocateAnythingWorker(path, device=device)
     raise ValueError(f"Unknown locator {name!r}; use locateanything or florence2")

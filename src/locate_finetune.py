@@ -17,6 +17,7 @@ DEFAULT_MODEL = "nvidia/LocateAnything-3B"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "work_dirs" / "locate_so101_gripper"
 DEFAULT_PHRASE = "SO-101 gripper"
 DEFAULT_HF_REPO = "kdaterao/so101_locate_gripper"
+DEFAULT_HF_MODEL_REPO = "kdaterao/locate_so101_gripper"
 
 
 def _norm_coord(v: float, size: int) -> int:
@@ -253,8 +254,11 @@ def cmd_train(args: argparse.Namespace) -> None:
     print()
     print("After training, load the checkpoint with:")
     print(
-        f'  python src/testing2.py --locate-model "{Path(args.output_dir).resolve()}" '
-        f'--prompt "{DEFAULT_PHRASE}"'
+        f'  python src/testing2.py --locate-model "{Path(args.output_dir).resolve()}"'
+    )
+    print(
+        f"  # push ckpt then smoke Hub: python src/locate_finetune.py push-model "
+        f"--output-dir {Path(args.output_dir).resolve()}"
     )
     print()
 
@@ -277,6 +281,61 @@ def cmd_train(args: argparse.Namespace) -> None:
     if proc.returncode != 0:
         raise SystemExit(f"Training failed with exit code {proc.returncode}. See {log_path}")
     print(f"Training finished. Checkpoint dir: {Path(args.output_dir).resolve()}")
+    if getattr(args, "push_model_to_hub", False):
+        cmd_push_model(
+            argparse.Namespace(
+                output_dir=args.output_dir,
+                repo_id=args.model_repo_id,
+                private=bool(getattr(args, "private", False)),
+                commit_message=f"LocateAnything SO-101 gripper fine-tune from {args.output_dir}",
+            )
+        )
+
+
+def cmd_push_model(args: argparse.Namespace) -> None:
+    """Upload a local LocateAnything checkpoint folder to Hugging Face Hub."""
+    try:
+        from hf_hub_windows import prepare_hf_hub_env
+
+        prepare_hf_hub_env()
+    except ImportError:
+        pass
+
+    from huggingface_hub import HfApi, create_repo
+
+    ckpt = Path(args.output_dir).resolve()
+    if not ckpt.is_dir():
+        raise SystemExit(f"Missing checkpoint dir: {ckpt}")
+    if not (ckpt / "config.json").is_file() and not (ckpt / "adapter_config.json").is_file():
+        raise SystemExit(
+            f"No config.json/adapter_config.json in {ckpt}. "
+            "Train first, or point --output-dir at the saved checkpoint."
+        )
+
+    repo_id = args.repo_id
+    private = bool(getattr(args, "private", False))
+    print(f"Pushing model {ckpt} -> {repo_id} (private={private})")
+    create_repo(repo_id, repo_type="model", private=private, exist_ok=True)
+    api = HfApi()
+    api.upload_folder(
+        folder_path=str(ckpt),
+        repo_id=repo_id,
+        repo_type="model",
+        commit_message=args.commit_message
+        or f"Upload locate_so101_gripper from {ckpt.name}",
+        ignore_patterns=[
+            "training_log.txt",
+            "runs/**",
+            "**/__pycache__/**",
+            "*.pt.tmp",
+            "optimizer.pt",
+            "scheduler.pt",
+            "rng_state*.pth",
+        ],
+    )
+    url = f"https://huggingface.co/{repo_id}"
+    print(f"Done: {url}")
+    print(f'  python src/testing2.py --locate-model "{repo_id}" --prompt "{DEFAULT_PHRASE}"')
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -342,7 +401,25 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("--overwrite-output-dir", action="store_true")
     tp.add_argument("--hf-token", default=None)
     tp.add_argument("--dry-run", action="store_true", help="Print command only")
+    tp.add_argument(
+        "--push-model-to-hub",
+        action="store_true",
+        help="After train succeeds, upload --output-dir to Hugging Face",
+    )
+    tp.add_argument(
+        "--model-repo-id",
+        default=DEFAULT_HF_MODEL_REPO,
+        help="HF model repo for --push-model-to-hub",
+    )
+    tp.add_argument("--private", action="store_true", help="Private HF model repo")
     tp.set_defaults(func=cmd_train)
+
+    mp = sub.add_parser("push-model", help="Upload a local LocateAnything ckpt to Hugging Face")
+    mp.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    mp.add_argument("--repo-id", default=DEFAULT_HF_MODEL_REPO)
+    mp.add_argument("--private", action="store_true")
+    mp.add_argument("--commit-message", default=None)
+    mp.set_defaults(func=cmd_push_model)
 
     return p
 

@@ -309,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--locate-model",
         default=None,
-        help="Model path/id (defaults: nvidia/LocateAnything-3B or microsoft/Florence-2-large)",
+        help="Model path/id (LocateAnything: local/Hub fine-tune or nvidia base; Florence: large)",
     )
     p.add_argument("--locate-phrase", default=DEFAULT_PHRASE)
     p.add_argument("--locate-points", type=int, default=8)
@@ -405,15 +405,16 @@ def main() -> None:
         print(f"Loading TapNet from {args.tapnet_checkpoint}...")
         tapir = BootsTAPIR(checkpoint=args.tapnet_checkpoint, device=device)
         if not args.skip_locate:
-            from florence2_worker import DEFAULT_FLORENCE_MODEL, load_locator
+            from florence2_worker import (
+                DEFAULT_FLORENCE_MODEL,
+                load_locator,
+                resolve_locate_model,
+            )
 
-            locate_model = args.locate_model
-            if locate_model is None:
-                locate_model = (
-                    DEFAULT_FLORENCE_MODEL
-                    if args.locator == "florence2"
-                    else "nvidia/LocateAnything-3B"
-                )
+            if args.locator == "florence2":
+                locate_model = args.locate_model or DEFAULT_FLORENCE_MODEL
+            else:
+                locate_model = resolve_locate_model(args.locate_model)
             locate_worker = load_locator(
                 args.locator, locate_model, device=str(tapir.device)
             )

@@ -61,8 +61,14 @@ python src/locate_finetune.py export --push-to-hub
 python src/locate_finetune.py train --eagle-root path/to/Eagle/Embodied --dry-run
 python src/locate_finetune.py train --eagle-root path/to/Eagle/Embodied
 
-# 4. Smoke the checkpoint live
-python src/testing2.py --locate-model work_dirs/locate_so101_gripper --prompt "SO-101 gripper"
+# 4. Push fine-tuned ckpt to Hub (only the dataset was pushed before — not the model)
+python src/locate_finetune.py push-model --output-dir work_dirs/locate_so101_gripper
+# or train with: ... train --eagle-root ... --push-model-to-hub
+
+# 5. Smoke live grounding
+python src/testing2.py
+# Resolves: local work_dirs/locate_so101_gripper → Hub kdaterao/locate_so101_gripper
+# → nvidia/LocateAnything-3B (if neither fine-tune exists yet)
 
 # Optional A/B: Florence-2 instead of LocateAnything (LocateAnything kept intact)
 python src/testing2.py --locator florence2 --prompt "SO-101 gripper"
@@ -100,7 +106,7 @@ python src/hf_preprocess_smolvla.py `
   --src-repo-id felsager/community_dataset_v3_ee_smolVLA `
   --dst-repo-id kdaterao/community_v3_ee_smolvla_tapnet `
   --episodes 0-99 `
-  --locate-model work_dirs/locate_so101_gripper `
+  --locate-model kdaterao/locate_so101_gripper `
   --gripper-closed-frac 0.15 `
   --gripper-open-frac 0.85 `
   --resume
