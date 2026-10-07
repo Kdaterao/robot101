@@ -30,12 +30,13 @@ def _count_labels(labels_path: Path) -> int:
     return n
 
 
-def _write_readme(data_root: Path, repo_id: str, n_labels: int, n_images: int) -> Path:
+def _write_readme(data_root: Path, repo_id: str, n_labels: int, n_images: int, n_points: int) -> Path:
     readme = data_root / "README.md"
     body = f"""---
 license: apache-2.0
 task_categories:
   - object-detection
+  - image-to-text
   - visual-question-answering
 tags:
   - robotics
@@ -48,29 +49,33 @@ pretty_name: SO-101 Locate Gripper
 
 # {repo_id}
 
-SO-101 gripper bounding-box labels for LocateAnything / Florence-2 grounding.
+SO-101 gripper point labels for visual point grounding, with legacy bounding-box labels retained.
 
 | | |
 |---|---|
 | Labels | {n_labels} |
+| Point labels | {n_points} |
 | Images | {n_images} |
 
 ## Layout
 
 ```
 images/           # JPEG frames (epXXXXXX_fXXXXXX_{{top,side}}.jpg)
-labels.jsonl      # click-drag boxes (xyxy pixels)
+point_labels.jsonl # user-clicked gripper points (pixels + normalized coordinates)
+labels.jsonl       # legacy click-drag boxes (xyxy pixels), when present
 locate_sft.jsonl  # optional Eagle / LocateAnything ShareGPT export
 recipe.json       # optional Eagle recipe pointing at this folder
 ```
 
-## Label row schema
+## Point label row schema
 
 ```json
 {{
   "image": "images/ep000500_f000120_top.jpg",
   "phrase": "SO-101 gripper",
-  "box_xyxy": [x1, y1, x2, y2],
+  "point_xy": [x, y],
+  "point_xy_norm": [x_normalized, y_normalized],
+  "point_target": "center_of_gripper_jaws",
   "width": 640,
   "height": 480,
   "episode": 500,
@@ -79,10 +84,10 @@ recipe.json       # optional Eagle recipe pointing at this folder
 }}
 ```
 
-Collected with [`locate_collect_label.py`](https://github.com/) batch labeling. Fine-tune Florence-2 with:
+Points are collected with a single click using `src/locate_collect_label.py`. Existing box labels remain available for the legacy Florence-2 path. Point labels are intended for the custom MolmoPoint fine-tuning workflow.
 
 ```bash
-python src/florence2_finetune.py train --dataset-repo {repo_id}
+python src/locate_collect_label.py batch
 ```
 """
     readme.write_text(body, encoding="utf-8")
@@ -111,32 +116,38 @@ def push_locate_gripper(
     data_root = Path(data_root).resolve()
     images_dir = data_root / "images"
     labels_path = data_root / "labels.jsonl"
+    point_labels_path = data_root / "point_labels.jsonl"
 
-    if not labels_path.is_file():
-        raise SystemExit(f"Missing {labels_path}. Label some frames first.")
+    if not labels_path.is_file() and not point_labels_path.is_file():
+        raise SystemExit(f"Missing {labels_path} and {point_labels_path}. Label some frames first.")
     if not images_dir.is_dir():
         raise SystemExit(f"Missing {images_dir}.")
 
     n_labels = _count_labels(labels_path)
+    n_points = _count_labels(point_labels_path)
     n_images = sum(1 for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"})
-    if n_labels == 0:
-        raise SystemExit(f"No labels in {labels_path}")
+    if n_labels == 0 and n_points == 0:
+        raise SystemExit(f"No labels in {labels_path} or {point_labels_path}")
 
     if write_readme:
-        _write_readme(data_root, repo_id, n_labels, n_images)
+        _write_readme(data_root, repo_id, n_labels, n_images, n_points)
 
-    allow_patterns = ["images/**", "labels.jsonl", "README.md"]
+    allow_patterns = ["images/**", "README.md"]
+    if labels_path.is_file():
+        allow_patterns.append("labels.jsonl")
+    if point_labels_path.is_file():
+        allow_patterns.append("point_labels.jsonl")
     if include_sft:
         allow_patterns.extend(["locate_sft.jsonl", "recipe.json"])
 
     ignore_patterns = sorted(_SKIP_NAMES)
 
     print(f"Pushing {data_root}")
-    print(f"  labels={n_labels} images={n_images} -> {repo_id} (private={private})")
+    print(f"  box_labels={n_labels} point_labels={n_points} images={n_images} -> {repo_id} (private={private})")
 
     api = HfApi()
     create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
-    msg = commit_message or f"Update locate_gripper ({n_labels} labels, {n_images} images)"
+    msg = commit_message or f"Update locate_gripper ({n_points} point labels, {n_labels} box labels, {n_images} images)"
     api.upload_folder(
         folder_path=str(data_root),
         repo_id=repo_id,
@@ -150,6 +161,7 @@ def push_locate_gripper(
     hub_meta = {
         "repo_id": repo_id,
         "n_labels": n_labels,
+        "n_point_labels": n_points,
         "n_images": n_images,
         "files": allow_patterns,
     }

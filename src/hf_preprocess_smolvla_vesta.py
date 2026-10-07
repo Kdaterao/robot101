@@ -1,11 +1,14 @@
-"""Preprocess felsager SmolVLA EE data: gripper stages, TapNet wrist heatmaps, static LA goals.
+"""Preprocess SmolVLA EE data with short-window wrist clustering and Vesta goals.
 
-Writes a new LeRobot v3 dataset with heatmap-filtered camera videos ready for training.
+Candidate wrist points are clustered over only the final frames of each stage, then
+the selected points are tracked backward through that stage. Vesta supplies
+third-person goal points, which are also tracked backward through their stages.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -13,24 +16,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from PIL import Image
-
-from robotap import (
-    Stage,
-    events_from_gripper_thresholds,
-    stages_from_events,
-)
-from tapnet_utils import (
-    BootsTAPIR,
-    DEFAULT_CHECKPOINT,
-    _kmeans_torch,
-    points_heatmap,
-    sample_query_points,
-)
 
 DEFAULT_SRC = "felsager/community_dataset_v3_ee_smolVLA"
-DEFAULT_DST = "kdaterao/community_v3_ee_smolvla_tapnet"
-DEFAULT_PHRASE = "SO-101 gripper"
+DEFAULT_DST = "kdaterao/community_v3_ee_smolvla_vesta"
+DEFAULT_CHECKPOINT = (
+    Path(__file__).resolve().parent.parent
+    / "tapnet"
+    / "checkpoints"
+    / "causal_bootstapir_checkpoint.pt"
+)
 CAMERAS_3P = ("top", "side")
 CAMERA_WRIST = "wrist"
 GRIPPER_INDEX = 7
@@ -158,12 +152,11 @@ def _load_episode_arrays(
         tasks.append(str(item.get("task", "")))
         for c in cameras:
             key = _cam_key(c)
-            present = key in item
-            if present:
+            if key in item:
                 frames[c].append(_tensor_to_rgb(item[key]))
             else:
                 frames[c].append(np.zeros((480, 640, 3), dtype=np.uint8))
-            masks[c].append(_mask_is_real(item, c) if present else False)
+            masks[c].append(_mask_is_real(item, c))
 
     return {
         "n": n,
@@ -242,44 +235,45 @@ def _wrist_poi_at_end(
     return seeds_arr
 
 
-def _locate_goal_points(
-    worker,
-    frame_rgb: np.ndarray,
-    phrase: str,
-    num_points: int,
-    rng: np.random.Generator,
-    locator_name: str = "locateanything",
-) -> np.ndarray:
-    """Static goal points from largest grounded box; empty if none."""
-    h, w = frame_rgb.shape[:2]
-    image = Image.fromarray(frame_rgb)
-    result = worker.ground_single(image, phrase)
-    answer = result.get("answer", "")
-    if not isinstance(answer, str):
-        answer = str(answer)
-    from florence2_worker import boxes_from_ground_result
+def _load_vesta_provider(spec: str):
+    """Load ``module[:factory]``; factory returns an object with goal_points()."""
+    module_name, separator, factory_name = spec.partition(":")
+    factory_name = factory_name if separator else "create_vesta_provider"
+    try:
+        module = importlib.import_module(module_name)
+        factory = getattr(module, factory_name)
+        provider = factory()
+    except (ImportError, AttributeError, TypeError) as e:
+        raise SystemExit(
+            f"Could not load Vesta provider {spec!r}: {e}. Expected "
+            "module:create_vesta_provider returning an object with "
+            "goal_points(frame_rgb, task)."
+        ) from e
+    if not callable(getattr(provider, "goal_points", None)):
+        raise SystemExit(
+            f"Vesta provider {spec!r} must return an object with "
+            "goal_points(frame_rgb, task)."
+        )
+    return provider
 
-    boxes = boxes_from_ground_result(worker, result, w, h)
-    if not boxes:
-        print(f"  {locator_name}: no boxes ({answer[:120]!r})")
+
+def _valid_goal_points(raw, width: int, height: int) -> np.ndarray:
+    """Validate Vesta's pixel-coordinate result and discard invalid points."""
+    if raw is None:
         return np.zeros((0, 2), dtype=np.float32)
-
-    def _area(b: dict) -> float:
-        return abs(b["x2"] - b["x1"]) * abs(b["y2"] - b["y1"])
-
-    box = sorted(boxes, key=_area, reverse=True)[0]
-    x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-    if x2 < x1:
-        x1, x2 = x2, x1
-    if y2 < y1:
-        y1, y2 = y2, y1
-    # pad tiny boxes
-    if x2 - x1 < 2 or y2 - y1 < 2:
-        cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
-        return np.array([[cx, cy]], dtype=np.float32)
-    xs = rng.uniform(x1, x2, size=num_points)
-    ys = rng.uniform(y1, y2, size=num_points)
-    return np.stack([xs, ys], axis=1).astype(np.float32)
+    points = np.asarray(raw, dtype=np.float32)
+    if points.size == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if points.ndim != 2 or points.shape[1] != 2:
+        raise ValueError(f"expected an N×2 array of pixel coordinates, got {points.shape}")
+    valid = (
+        np.isfinite(points).all(axis=1)
+        & (points[:, 0] >= 0)
+        & (points[:, 0] < width)
+        & (points[:, 1] >= 0)
+        & (points[:, 1] < height)
+    )
+    return points[valid].astype(np.float32, copy=False)
 
 
 def _clone_features(meta_features: dict, default_features: dict) -> dict:
@@ -294,7 +288,7 @@ def _clone_features(meta_features: dict, default_features: dict) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="HF SmolVLA preprocess: gripper stages + TapNet/LA heatmaps -> new LeRobot dataset"
+        description="HF SmolVLA preprocess: tail-window wrist clustering + Vesta goals"
     )
     p.add_argument("--src-repo-id", default=DEFAULT_SRC)
     p.add_argument("--dst-repo-id", default=DEFAULT_DST)
@@ -302,19 +296,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default=None)
     p.add_argument("--tapnet-checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     p.add_argument(
-        "--locator",
-        default="locateanything",
-        choices=["locateanything", "florence2"],
-        help="Grounding backend (default locateanything; florence2 for A/B comparison)",
+        "--vesta-provider",
+        default=None,
+        help="Python provider as module[:factory]; factory defaults to create_vesta_provider",
     )
     p.add_argument(
-        "--locate-model",
+        "--vesta-task",
         default=None,
-        help="Model path/id (LocateAnything: local/Hub fine-tune or nvidia base; Florence: large)",
+        help="Task text override passed to Vesta (otherwise use the episode task text)",
     )
-    p.add_argument("--locate-phrase", default=DEFAULT_PHRASE)
-    p.add_argument("--locate-points", type=int, default=8)
-    p.add_argument("--skip-locate", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="Only compute stages; no TapNet/write")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--push-to-hub", action="store_true")
@@ -331,6 +321,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-sample-points", type=int, default=128)
     p.add_argument("--num-poi-points", type=int, default=16)
     p.add_argument("--n-clusters", type=int, default=6)
+    p.add_argument(
+        "--cluster-tail-frames",
+        type=int,
+        default=30,
+        help="Candidate-point clustering window at the end of each stage",
+    )
     p.add_argument("--static-thresh-px", type=float, default=8.0)
     p.add_argument("--heatmap-sigma", type=float, default=40.0)
     p.add_argument("--heatmap-alpha", type=float, default=0.55)
@@ -347,6 +343,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.cluster_tail_frames < 1:
+        raise SystemExit("--cluster-tail-frames must be at least 1")
+    # Keep --help usable even when optional TapNet dependencies are unavailable.
+    global BootsTAPIR, _kmeans_torch, points_heatmap, sample_query_points
+    from robotap import Stage, events_from_gripper_thresholds, stages_from_events
+    from tapnet_utils import BootsTAPIR, _kmeans_torch, points_heatmap, sample_query_points
+
+    vesta = None
+    if not args.dry_run:
+        if not args.vesta_provider:
+            raise SystemExit(
+                "--vesta-provider is required unless --dry-run is used. See "
+                "TAPNET_COMMANDS.md for the provider contract."
+            )
+        vesta = _load_vesta_provider(args.vesta_provider)
     LeRobotDataset, LeRobotDatasetMetadata, DEFAULT_FEATURES, HF_LEROBOT_HOME = _load_lerobot()
 
     ep_filter = _parse_episodes(args.episodes)
@@ -400,25 +411,10 @@ def main() -> None:
             )
 
     tapir = None
-    locate_worker = None
     if not args.dry_run:
         device = args.device
         print(f"Loading TapNet from {args.tapnet_checkpoint}...")
         tapir = BootsTAPIR(checkpoint=args.tapnet_checkpoint, device=device)
-        if not args.skip_locate:
-            from florence2_worker import (
-                DEFAULT_FLORENCE_MODEL,
-                load_locator,
-                resolve_locate_model,
-            )
-
-            if args.locator == "florence2":
-                locate_model = args.locate_model or DEFAULT_FLORENCE_MODEL
-            else:
-                locate_model = resolve_locate_model(args.locate_model)
-            locate_worker = load_locator(
-                args.locator, locate_model, device=str(tapir.device)
-            )
 
     rng = np.random.default_rng(args.seed)
     cameras = [CAMERA_WRIST, *CAMERAS_3P]
@@ -485,13 +481,22 @@ def main() -> None:
         for si, st in enumerate(reversed(stages)):
             if not wrist_ok:
                 break
-            clip = wrist_frames[st.start : st.end + 1]
-            if len(clip) < 2:
+            if not data["masks"][CAMERA_WRIST][st.end]:
+                print(
+                    f"  wrist clustering skipped stage[{st.start},{st.end}]: "
+                    "no real stage-end frame",
+                    flush=True,
+                )
                 continue
-            # only use frames where mask is true if possible
+            clip = wrist_frames[st.start : st.end + 1]
+            if not clip:
+                continue
+            # Track the full candidate set only over the stage's tail window.
+            tail_len = min(len(clip), max(1, args.cluster_tail_frames))
+            tail_clip = clip[-tail_len:]
             seeds = _wrist_poi_at_end(
                 tapir,
-                clip,
+                tail_clip,
                 num_sample=args.num_sample_points,
                 num_poi=args.num_poi_points,
                 n_clusters=args.n_clusters,
@@ -510,25 +515,65 @@ def main() -> None:
             wrist_tracks[st.start : st.start + T, :n_pts] = np.transpose(tr[:n_pts], (1, 0, 2))
             wrist_vis[st.start : st.start + T, :n_pts] = np.transpose(vi[:n_pts], (1, 0))
 
-        # --- Stage 1 3P: static LA goals at stage.end ---
-        stage_goals: dict[str, dict[int, np.ndarray]] = {c: {} for c in CAMERAS_3P}
+        # --- Third-person Vesta goals, propagated backward through each stage ---
+        stage_goal_tracks: dict[str, dict[int, tuple[np.ndarray, np.ndarray]]] = {
+            c: {} for c in CAMERAS_3P
+        }
         for st in stages:
+            episode_task = next(
+                (str(task).strip() for task in data["tasks"][st.start : st.end + 1] if str(task).strip()),
+                "",
+            )
+            task_text = args.vesta_task.strip() if args.vesta_task else episode_task
+            if not task_text:
+                print(
+                    f"  Vesta unresolved stage[{st.start},{st.end}]: no task text",
+                    flush=True,
+                )
+                continue
             for cam in CAMERAS_3P:
                 if not data["masks"][cam][st.end]:
+                    print(
+                        f"  Vesta unresolved {cam} stage[{st.start},{st.end}]: "
+                        "no real stage-end frame",
+                        flush=True,
+                    )
                     continue
-                if args.skip_locate or locate_worker is None:
+                frame = data["frames"][cam][st.end]
+                height, width = frame.shape[:2]
+                try:
+                    raw_points = vesta.goal_points(frame, task_text)
+                    points = _valid_goal_points(raw_points, width, height)
+                except Exception as e:
+                    print(
+                        f"  Vesta unresolved {cam} stage[{st.start},{st.end}]: {e}",
+                        flush=True,
+                    )
                     continue
-                pts = _locate_goal_points(
-                    locate_worker,
-                    data["frames"][cam][st.end],
-                    args.locate_phrase,
-                    args.locate_points,
-                    rng,
-                    locator_name=args.locator,
-                )
-                stage_goals[cam][id(st)] = pts
+                if len(points) == 0:
+                    print(
+                        f"  Vesta unresolved {cam} stage[{st.start},{st.end}]: "
+                        "no valid goal points",
+                        flush=True,
+                    )
+                    continue
+                clip = data["frames"][cam][st.start : st.end + 1]
+                try:
+                    tracks, visible = tapir.track_segment_backward(
+                        clip,
+                        points,
+                        label=f"ep{ep_idx}/{cam}/s{st.start}-{st.end}-back",
+                    )
+                except Exception as e:
+                    print(
+                        f"  Vesta goal tracking failed {cam} stage[{st.start},{st.end}]: {e}",
+                        flush=True,
+                    )
+                    continue
+                stage_goal_tracks[cam][id(st)] = (tracks, visible)
                 print(
-                    f"  {cam} stage[{st.start},{st.end}] {args.locator} goals={len(pts)}",
+                    f"  {cam} stage[{st.start},{st.end}] Vesta goals={len(points)} "
+                    f"tracked={tracks.shape[1]} frames",
                     flush=True,
                 )
 
@@ -569,19 +614,21 @@ def main() -> None:
                 frame[_cam_key(CAMERA_WRIST)] = _rgb_to_dataset(
                     cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 )
-            # 3rd person static goals
+            # Third-person Vesta goal tracks
             for cam in CAMERAS_3P:
                 key = _cam_key(cam)
                 if key not in dst.meta.features:
                     continue
                 bgr = cv2.cvtColor(data["frames"][cam][t], cv2.COLOR_RGB2BGR)
-                goals = stage_goals[cam].get(id(st))
-                if goals is not None and len(goals) > 0 and data["masks"][cam][t]:
-                    vis = np.ones(len(goals), dtype=bool)
+                tracked = stage_goal_tracks[cam].get(id(st))
+                if tracked is not None and data["masks"][cam][t]:
+                    tracks, vis = tracked
+                    local_t = t - st.start
+                    local_t = min(max(local_t, 0), tracks.shape[1] - 1)
                     bgr = points_heatmap(
                         bgr,
-                        goals,
-                        vis,
+                        tracks[:, local_t],
+                        vis[:, local_t],
                         sigma=args.heatmap_sigma,
                         alpha=args.heatmap_alpha,
                     )

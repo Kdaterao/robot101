@@ -14,29 +14,33 @@ pretty_name: SO-101 Locate Gripper
 
 # kdaterao/so101_locate_gripper
 
-SO-101 gripper bounding-box labels for LocateAnything / Florence-2 grounding.
+SO-101 gripper point labels for visual point grounding. Legacy bounding-box labels are retained for the Florence-2 experiments.
 
 | | |
 |---|---|
 | Labels | 290 |
+| Point labels | 0 (collect with `locate_collect_label.py`) |
 | Images | 288 |
 
 ## Layout
 
 ```
 images/           # JPEG frames (epXXXXXX_fXXXXXX_{top,side}.jpg)
-labels.jsonl      # click-drag boxes (xyxy pixels)
+point_labels.jsonl # user-clicked gripper points (pixels + normalized coordinates)
+labels.jsonl       # legacy click-drag boxes (xyxy pixels)
 locate_sft.jsonl  # optional Eagle / LocateAnything ShareGPT export
 recipe.json       # optional Eagle recipe pointing at this folder
 ```
 
-## Label row schema
+## Point label row schema
 
 ```json
 {
   "image": "images/ep000500_f000120_top.jpg",
   "phrase": "SO-101 gripper",
-  "box_xyxy": [x1, y1, x2, y2],
+  "point_xy": [x, y],
+  "point_xy_norm": [x_normalized, y_normalized],
+  "point_target": "center_of_gripper_jaws",
   "width": 640,
   "height": 480,
   "episode": 500,
@@ -45,8 +49,10 @@ recipe.json       # optional Eagle recipe pointing at this folder
 }
 ```
 
-Collected with [`locate_collect_label.py`](https://github.com/) batch labeling; export with:
+Collected by clicking the center of the gripper jaws in `src/locate_collect_label.py`; intended for custom MolmoPoint fine-tuning. Existing box annotations remain available for the legacy Florence-2 workflow.
+
+Start point collection with:
 
 ```bash
-python src/locate_finetune.py export --data-root .
+python src/locate_collect_label.py batch
 ```

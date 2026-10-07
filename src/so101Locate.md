@@ -29,13 +29,15 @@ hf auth login
 `packages-locate.sh` also pulls tapnet, lerobot, Eagle, and `requirements-locate-finetune.txt`.
 Not required for Florence-2 training.
 
-## A. Label SO-101 gripper + fine-tune Florence-2
+## A. Collect SO-101 gripper point labels
+
+The current label UI collects one user-clicked point at the center of the gripper jaws and writes `point_labels.jsonl` (pixel and normalized coordinates). It does not change the existing `labels.jsonl` box annotations. These point labels are for the planned custom MolmoPoint training data.
 
 ```bash
 # 0. Log in (avoids Hub 429 rate limits)
 hf auth login
 
-# 1. Recommended: pull a small batch, label, repeat
+# 1. Recommended: pull a small batch, click-label, repeat
 # Clear old identical dumps if needed: Remove-Item -Recurse data/locate_gripper/images
 python src/locate_collect_label.py batch
 # Default: 1 episode, 1 timestamp, top+side -> 2 JPEGs per round (not every frame in the clip)
@@ -51,7 +53,7 @@ python src/locate_collect_label.py batch
 
 #    Each round:
 #      - downloads only the next few episodes' videos (not the whole dataset)
-#      - opens the click-drag label UI
+#      - opens the single-click point-label UI (center of gripper jaws)
 #      - asks: Pull next batch? [Y/n/q]
 #    Progress is saved in data/locate_gripper/batch_state.json
 
@@ -60,15 +62,15 @@ python src/locate_collect_label.py sample --num-frames 4 --timestamps-per-episod
 python src/locate_collect_label.py label
 ```
 
-Controls while labeling: drag box, `s` save, `n` skip, `u` clear, `q` quit (resume later).
+Controls while labeling: click to place/move point, `s` save, `n` skip, `u` clear, `q` quit (resume later). Point records go to `data/locate_gripper/point_labels.jsonl`.
 
 ```bash
-# 1b. Push labels + images to Hugging Face (default: kdaterao/so101_locate_gripper)
+# 1b. Push point labels + images to Hugging Face (default: kdaterao/so101_locate_gripper)
 python src/locate_push_hf.py
 # or: python src/locate_collect_label.py push
 # or quit batch with: python src/locate_collect_label.py batch --push-to-hub
 
-# 2. Fine-tune Florence-2 on that dataset (local folder or Hub)
+# Legacy: fine-tune Florence-2 using the existing box labels.jsonl (the point UI does not create boxes)
 python src/florence2_finetune.py preview --data-root data/locate_gripper
 python src/florence2_finetune.py train --data-root data/locate_gripper
 # From Hub only (no local images needed):
@@ -105,37 +107,36 @@ python src/locate_collect_label.py batch
 Optional: enable Windows **Developer Mode** if you prefer Hub symlink caching. Upgrade to HF PRO if you need higher rate limits: https://huggingface.co/pricing
 
 
-## B. Preprocess HF teleop → heatmap SmolVLA dataset
+## B. Preprocess HF teleop → POV + third-person grounded tracks
 
-Reads `felsager/community_dataset_v3_ee_smolVLA`, splits substages from **per-episode gripper min/max** + gripper velocity, seeds wrist POIs (TapNet), marks static 3rd-person gripper goals (LocateAnything, no tracking), writes a new LeRobot dataset with heatmap cameras.
+The grounded entrypoint keeps gripper open/close segmentation, clusters shared POV candidates only on each stage tail, and backward-tracks selected POV points through full stages. It extracts task noun phrases with spaCy, grounds those nouns plus the gripper with MolmoPoint on each available third-person view, chooses the endpoint object by gripper proximity (or gripper fallback), and forward-tracks the selected start-frame points. Per-subtask diagnostics are saved as JSON sidecars.
 
 ```bash
-# Dry-run stages only (no TapNet / no write)
-python src/hf_preprocess_smolvla.py --episodes 0-2 --dry-run
+# Install point-grounding dependencies in the training environment
+pip install -r requirements-molmo-grounding.txt
+python -m spacy download en_core_web_sm
 
-# Full preprocess (small slice)
-python src/hf_preprocess_smolvla.py `
-  --src-repo-id felsager/community_dataset_v3_ee_smolVLA `
-  --dst-repo-id kdaterao/community_v3_ee_smolvla_tapnet `
-  --episodes 0-99 `
-  --locate-model kdaterao/locate_so101_gripper `
-  --gripper-closed-frac 0.15 `
-  --gripper-open-frac 0.85 `
-  --resume
+# Dry-run stage boundaries (no MolmoPoint or TapIR)
+python src/hf_preprocess_smolvla_grounded.py --episodes 0-2 --dry-run
 
-# Same preprocess with Florence-2 grounding (no LocateAnything load)
-python src/hf_preprocess_smolvla.py --episodes 0-2 --locator florence2 --dry-run
-python src/hf_preprocess_smolvla.py --episodes 0-99 --locator florence2 --resume
+# Full preprocess (small slice with debug images)
+python src/hf_preprocess_smolvla_grounded.py \
+  --src-repo-id felsager/community_dataset_v3_ee_smolVLA \
+  --dst-repo-id kdaterao/community_v3_ee_smolvla_molmo_grounded \
+  --episodes 0-2 --cluster-tail-frames 30 \
+  --object-proximity-threshold 0.08 \
+  --viz-dir outputs/molmo_grounded_viz
 
-# Optional Hub publish
-python src/hf_preprocess_smolvla.py --episodes 0-99 --resume --push-to-hub
+# Continue/resume a larger run; use a custom checkpoint after MolmoPoint fine-tuning
+python src/hf_preprocess_smolvla_grounded.py --episodes 0-99 --resume \
+  --molmo-model work_dirs/molmo_so101_gripper_hf
 ```
 
-Then point [`src/train.py`](train.py) at `kdaterao/community_v3_ee_smolvla_tapnet` (same `observation.images.{top,wrist,side}` keys).
+The script writes per-subtask diagnostics under the destination's `point_tracks/` directory and renders selected tracks as heatmaps in the camera streams.
 
 ### Notes
 
-- **Wrist:** Stage-2 backward TapNet on motion-clustered POIs → time-varying heatmap
-- **Top/side:** LocateAnything or Florence-2 box at `stage.end` → **static** goal heatmap (camera is fixed)
+- **Wrist:** shared tail-window tracking + cross-demo funneling/clustering → full-stage backward TapIR tracks
+- **Top/side:** MolmoPoint noun/gripper grounding → endpoint proximity decision → selected forward TapIR tracks
 - Gripper open/closed bands = episode-local `g_min + frac*(g_max-g_min)` plus velocity stall/min
-- Locators: `--locator locateanything` (default) or `--locator florence2` (`src/florence2_worker.py`)
+- Ambiguous candidates, missing frames, invalid points, grounding errors, and tracker loss are retained in sidecar failure fields for inspection.

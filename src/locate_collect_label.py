@@ -1,4 +1,4 @@
-"""Sample SO101 frames from a LeRobot HF dataset and click-drag label grippers.
+"""Sample SO101 frames from a LeRobot HF dataset and point-label grippers.
 
 Preferred workflow (small Hub pulls + review):
   python src/locate_collect_label.py batch --batch-size 20
@@ -20,6 +20,7 @@ DEFAULT_REPO = "felsager/community_dataset_v3_ee_smolVLA"
 DEFAULT_HF_PUSH_REPO = "kdaterao/so101_locate_gripper"
 DEFAULT_CAMERAS = ("top", "side")
 DEFAULT_PHRASE = "SO-101 gripper"
+POINT_LABELS_NAME = "point_labels.jsonl"
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "locate_gripper"
 BATCH_STATE_NAME = "batch_state.json"
 
@@ -566,77 +567,50 @@ def _load_labeled_paths(labels_path: Path) -> set[str]:
     return labeled
 
 
-class BoxLabeler:
-    """OpenCV click-drag bounding-box labeler."""
+class PointLabeler:
+    """OpenCV single-click point labeler."""
 
     def __init__(self, window: str = "locate_label"):
         self.window = window
-        self.drawing = False
-        self.x0 = self.y0 = self.x1 = self.y1 = 0
-        self.box: tuple[int, int, int, int] | None = None
+        self.point: tuple[int, int] | None = None
         self.base: np.ndarray | None = None
         self.view: np.ndarray | None = None
 
     def set_image(self, bgr: np.ndarray) -> None:
         self.base = bgr.copy()
-        self.box = None
-        self.drawing = False
+        self.point = None
         self._redraw()
 
     def _clamp(self, x: int, y: int) -> tuple[int, int]:
         assert self.base is not None
         h, w = self.base.shape[:2]
+        # WINDOW_NORMAL may display the frame at a different size than its pixels.
+        try:
+            _left, _top, display_w, display_h = cv2.getWindowImageRect(self.window)
+            if display_w > 0 and display_h > 0:
+                x = int(round(x * w / display_w))
+                y = int(round(y * h / display_h))
+        except (AttributeError, cv2.error):
+            pass
         return max(0, min(w - 1, x)), max(0, min(h - 1, y))
-
-    def _normalized_box(self) -> tuple[int, int, int, int] | None:
-        if self.box is None:
-            x0, y0, x1, y1 = self.x0, self.y0, self.x1, self.y1
-        else:
-            x0, y0, x1, y1 = self.box
-        x0, x1 = sorted((x0, x1))
-        y0, y1 = sorted((y0, y1))
-        if x1 - x0 < 2 or y1 - y0 < 2:
-            return None
-        return x0, y0, x1, y1
 
     def _redraw(self) -> None:
         assert self.base is not None
         vis = self.base.copy()
-        box = self._normalized_box() if self.drawing or self.box is not None else None
-        if self.drawing:
-            x0, y0 = self.x0, self.y0
-            x1, y1 = self.x1, self.y1
-            cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 255, 255), 2)
-        elif box is not None:
-            x0, y0, x1, y1 = box
-            cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 255, 0), 2)
-            self.box = box
+        if self.point is not None:
+            x, y = self.point
+            cv2.drawMarker(vis, (x, y), (0, 255, 0), cv2.MARKER_CROSS, 22, 2)
+            cv2.circle(vis, (x, y), 5, (0, 255, 0), 2)
         self.view = vis
         cv2.imshow(self.window, vis)
 
     def on_mouse(self, event: int, x: int, y: int, flags: int, param) -> None:
-        if self.base is None:
-            return
-        x, y = self._clamp(x, y)
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.drawing = True
-            self.box = None
-            self.x0 = self.y0 = self.x1 = self.y1 = 0
-            self.x0, self.y0 = x, y
-            self.x1, self.y1 = x, y
-            self._redraw()
-        elif event == cv2.EVENT_MOUSEMOVE and self.drawing:
-            self.x1, self.y1 = x, y
-            self._redraw()
-        elif event == cv2.EVENT_LBUTTONUP and self.drawing:
-            self.drawing = False
-            self.x1, self.y1 = x, y
-            self.box = self._normalized_box()
+        if self.base is not None and event == cv2.EVENT_LBUTTONDOWN:
+            self.point = self._clamp(x, y)
             self._redraw()
 
-    def clear_box(self) -> None:
-        self.box = None
-        self.drawing = False
+    def clear_point(self) -> None:
+        self.point = None
         self._redraw()
 
 
@@ -664,7 +638,8 @@ def run_label_ui(
 ) -> str:
     """OpenCV label loop. Returns 'done' | 'quit' | 'empty'."""
     images_dir = out_dir / "images"
-    labels_path = out_dir / "labels.jsonl"
+    # Keep legacy box annotations intact; point annotations have their own file.
+    labels_path = out_dir / POINT_LABELS_NAME
     if not images_dir.is_dir():
         raise SystemExit(f"No images directory at {images_dir}. Run `sample`/`batch` first.")
 
@@ -686,13 +661,14 @@ def run_label_ui(
         pending = images
 
     print(f"Images: {len(images)} total, {len(pending)} to label, phrase={phrase!r}")
-    print("Controls: drag box | s=save | n=skip | u=clear box | q=quit")
+    print("Click the center of the gripper jaws.")
+    print("Controls: click=mark | s=save | n=skip | u=clear point | q=quit")
 
     if not pending:
         print("Nothing to label.")
         return "empty"
 
-    labeler = BoxLabeler()
+    labeler = PointLabeler()
     cv2.namedWindow(labeler.window, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(labeler.window, labeler.on_mouse)
 
@@ -724,19 +700,22 @@ def run_label_ui(
                 i += 1
                 break
             if key == ord("u"):
-                labeler.clear_box()
+                labeler.clear_point()
                 continue
             if key == ord("s"):
-                box = labeler.box
-                if box is None:
-                    print("  Draw a box before saving (s).")
+                point = labeler.point
+                if point is None:
+                    print("  Click the gripper point before saving (s).")
                     continue
                 ep, fr, cam = _parse_meta_from_name(path.name)
                 h, w = bgr.shape[:2]
+                x, y = point
                 row = {
                     "image": rel.replace("\\", "/"),
                     "phrase": phrase,
-                    "box_xyxy": [int(box[0]), int(box[1]), int(box[2]), int(box[3])],
+                    "point_xy": [int(x), int(y)],
+                    "point_xy_norm": [float(x / max(1, w - 1)), float(y / max(1, h - 1))],
+                    "point_target": "center_of_gripper_jaws",
                     "width": w,
                     "height": h,
                     "episode": ep,
@@ -747,7 +726,7 @@ def run_label_ui(
                     f.write(json.dumps(row) + "\n")
                 labeled.add(rel)
                 saved += 1
-                print(f"  saved {row['box_xyxy']} -> {labels_path.name}")
+                print(f"  saved point {row['point_xy']} -> {labels_path.name}")
                 i += 1
                 break
 
@@ -880,7 +859,7 @@ def cmd_batch(args: argparse.Namespace) -> None:
             _maybe_push_locate(args, out_dir)
             return
 
-        labeled_n = len(_load_labeled_paths(out_dir / "labels.jsonl"))
+        labeled_n = len(_load_labeled_paths(out_dir / POINT_LABELS_NAME))
         print(
             f"\nBatch {batch_idx} review done. "
             f"labels={labeled_n}, next_episode={next_ep}, state={state_path}"
@@ -901,7 +880,7 @@ def cmd_batch(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Sample HF teleop frames and click-drag label SO-101 grippers for LocateAnything."
+        description="Sample HF teleop frames and click-label SO-101 gripper points."
     )
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -943,10 +922,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_sample)
 
-    lp = sub.add_parser("label", help="OpenCV click-drag UI to write labels.jsonl")
+    lp = sub.add_parser("label", help="OpenCV single-click UI to write point_labels.jsonl")
     lp.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output root with images/")
-    lp.add_argument("--phrase", default=DEFAULT_PHRASE, help="Grounding phrase for each box")
-    lp.add_argument("--relabel-all", action="store_true", help="Ignore existing labels.jsonl entries")
+    lp.add_argument("--phrase", default=DEFAULT_PHRASE, help="Description associated with each labeled point")
+    lp.add_argument("--relabel-all", action="store_true", help="Ignore existing point_labels.jsonl entries")
     lp.add_argument("--push-to-hub", action="store_true", help="Upload locate_gripper after labeling")
     lp.add_argument("--hf-repo-id", default=DEFAULT_HF_PUSH_REPO, help="Destination HF dataset repo")
     lp.add_argument("--private", action="store_true", help="Private HF dataset")

@@ -178,6 +178,75 @@ python src/tapnetGrabPose.py --task tasks/pick_place_task_steps.npz --mode robot
 | `--ik-min-move` | 0.006 m | re-solve IK only after the target moves this far; otherwise resend the last pose |
 | `--roll-min-deg` | 1.5 | re-solve once accumulated wrist roll reaches this |
 | `--max-joint-step` | 4 deg | per-joint cap on each tick's command |
+
+## HF SmolVLA preprocessing with Vesta goals
+
+`src/hf_preprocess_smolvla_vesta.py` is a separate preprocessing entrypoint; the
+original `src/hf_preprocess_smolvla.py` remains available. The new script clusters
+wrist candidates over only the last 30 frames of each stage, then tracks the
+selected points backward through the full stage. Vesta supplies task-conditioned
+goal points for each available top/side frame at `stage.end`; TAPIR tracks those
+points backward through that stage before they are written as per-frame heatmaps.
+
+```bash
+python src/hf_preprocess_smolvla_vesta.py \
+  --vesta-provider my_vesta_adapter:create_vesta_provider \
+  --cluster-tail-frames 30 \
+  --episodes 0-2 --dry-run
+
+python src/hf_preprocess_smolvla_vesta.py \
+  --vesta-provider my_vesta_adapter:create_vesta_provider \
+  --cluster-tail-frames 30 \
+  --episodes 0-99 --resume
+```
+
+The provider module must expose a factory (default name
+`create_vesta_provider`) returning an object with
+`goal_points(frame_rgb, task) -> N×2 pixel coordinates`. `frame_rgb` is a
+`uint8` RGB NumPy array and `task` is the dataset's task text for the stage;
+`--vesta-task` overrides it. Out-of-frame and non-finite points are discarded.
+Stages without a task, valid Vesta goals, or a real stage-end camera frame are
+reported and receive no third-person goal overlay. `--cluster-tail-frames` applies
+per stage; shorter stages use their full available length.
+
+## HF SmolVLA preprocessing with MolmoPoint + spaCy
+
+`src/hf_preprocess_smolvla_grounded.py` is the point-grounding data-generation
+entrypoint. It extracts task noun phrases with spaCy, adds `robot gripper`, and
+uses MolmoPoint on each available top/side camera at every subtask start. TAPIR
+tracks all candidate points forward to the subtask endpoint; the nearest noun
+entity to the gripper is selected when normalized distance is at most `0.08`.
+Otherwise it uses the gripper points as a fallback. The selected start-frame
+points are tracked forward for the final third-person goal tracks.
+
+POV processing samples one shared set of candidate points, tracks them only
+through each stage's final 30 frames, selects points across the shared stage
+prefix with RoboTAP funneling/clustering, then tracks selected endpoint points
+backward through each full stage. Extra stages are selected per episode when
+episode stage counts differ.
+
+Install the extras and spaCy English model:
+
+```bash
+pip install -r requirements-molmo-grounding.txt
+python -m spacy download en_core_web_sm
+```
+
+Run a small dataset slice:
+
+```bash
+python src/hf_preprocess_smolvla_grounded.py \
+  --episodes 0-2 --dst-repo-id kdaterao/molmo_grounded_smoke \
+  --cluster-tail-frames 30 --viz-dir outputs/molmo_grounded_viz
+```
+
+Use `--dry-run` to inspect gripper-based stage boundaries without loading
+MolmoPoint or TAPIR. The default model is `allenai/MolmoPoint-8B`; pass
+`--molmo-model <local-or-HF-checkpoint>` to use a converted custom checkpoint.
+Per-subtask records, including raw Molmo responses, selected entity, distance,
+tracks, visibility, and failure reasons, are written to
+`<dataset-cache>/point_tracks/epNNNNNN.json`. The same selected tracks are
+rendered into wrist and third-person heatmaps in the LeRobot output dataset.
 | `--lookahead` / `--end-frac` | … | **tapnetGrab only** (demo trajectory following) |
 | `--advance-progress` | 0 | **tapnetGrab** — optional progress escape (0 = stop on pixel error only) |
 | `--depth` | 0.20 m | assumed Z for analytical Jacobian (`tapnetGrabGoal` / Pose / Greedy hybrid) |

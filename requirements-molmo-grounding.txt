@@ -1,0 +1,5 @@
+# MolmoPoint + task noun extraction for hf_preprocess_smolvla_grounded.py
+transformers==4.57.1
+accelerate>=1.5
+spacy>=3.7,<4
+Pillow>=10
