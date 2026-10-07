@@ -151,6 +151,8 @@ else:
 launcher.write_text(launcher_text, encoding="utf-8")
 
 trainer_text = trainer.read_text(encoding="utf-8")
+if "import os" not in trainer_text:
+    trainer_text = trainer_text.replace("import logging" + chr(10), "import logging" + chr(10) + "import os" + chr(10), 1)
 old_checkpoint_load = (
     '                state_dict = torch.load(join(cfg.initial_model_checkpoint, "model.pt"), map_location="cpu")' + chr(10)
     + '                olmo_model.load_state_dict(state_dict)' + chr(10)
@@ -166,6 +168,32 @@ if old_checkpoint_load in trainer_text:
     trainer_text = trainer_text.replace(old_checkpoint_load, memory_efficient_load, 1)
 elif memory_efficient_load not in trainer_text:
     raise SystemExit(f"Could not find the expected Molmo checkpoint loader in {trainer}")
+
+old_fit_end = (
+    '            trainer.fit()' + chr(10)
+    + '            log.info("Training complete")'
+)
+connector_fit_end = (
+    '            trainer.fit()' + chr(10)
+    + '            if os.environ.get("SO101_SAVE_CONNECTOR_ONLY") == "1":' + chr(10)
+    + '                model = trainer.fsdp_model.module' + chr(10)
+    + '                connector_state = {' + chr(10)
+    + '                    name: param.detach().to(device="cpu", copy=True)' + chr(10)
+    + '                    for name, param in model.named_parameters() if param.requires_grad' + chr(10)
+    + '                }' + chr(10)
+    + '                if not connector_state:' + chr(10)
+    + '                    raise RuntimeError("No trainable connector parameters to save")' + chr(10)
+    + '                if get_global_rank() == 0:' + chr(10)
+    + '                    connector_path = Path(cfg.save_folder) / "so101_connector.pt"' + chr(10)
+    + '                    torch.save(connector_state, connector_path)' + chr(10)
+    + '                    log.info(f"Saved {len(connector_state)} trainable tensors to {connector_path}")' + chr(10)
+    + '                barrier()' + chr(10)
+    + '            log.info("Training complete")'
+)
+if old_fit_end in trainer_text:
+    trainer_text = trainer_text.replace(old_fit_end, connector_fit_end, 1)
+elif connector_fit_end not in trainer_text:
+    raise SystemExit(f"Could not find the expected Molmo training-completion point in {trainer}")
 trainer.write_text(trainer_text, encoding="utf-8")
 print(f"Installed SO-101 point adapter in {repo}")
 PY
@@ -175,6 +203,7 @@ python3 -m pip install -e "${MOLMO_REPO_ROOT}[train]"
 
 export MOLMO_DATA_DIR
 export SO101_POINT_DATA_ROOT="${PREPARED_DATA}"
+export SO101_SAVE_CONNECTOR_ONLY=1
 python3 "${REPO_ROOT}/scripts/prepare_molmo_so101.py" \
   --repo-id "${DATASET_REPO}" \
   --cache-dir "${DATA_CACHE}" \
@@ -224,9 +253,9 @@ torchrun --standalone --nproc-per-node=1 \
   --seq_len=1024 \
   --max_duration="${MAX_DURATION}" \
   --save_interval=100 \
-  --save_interval_unsharded="${MAX_DURATION}" \
+  --save_interval_unsharded=null \
   --save_num_checkpoints_to_keep=0 \
-  --save_num_unsharded_checkpoints_to_keep=1 \
+  --save_num_unsharded_checkpoints_to_keep=0 \
   --eval_interval=-1 \
   --inf_eval_interval=-1 \
   --data.num_workers=0 \
@@ -238,4 +267,4 @@ torchrun --standalone --nproc-per-node=1 \
   --optimizer.connector_learning_rate=5e-5 \
   --wandb=null
 
-echo "Training finished. Checkpoints: ${SAVE_FOLDER}"
+echo "Training finished. Connector weights: ${SAVE_FOLDER}/so101_connector.pt"
