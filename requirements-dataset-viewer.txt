@@ -1,0 +1,4 @@
+# Lightweight browser viewer; no GPU, model, or LeRobot installation needed.
+datasets>=3,<5
+huggingface-hub>=0.34,<2
+Pillow>=10

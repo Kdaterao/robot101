@@ -217,7 +217,7 @@ uses Molmo2 with the SO-101 connector on each available top/side camera at every
 tracks all candidate points forward to the subtask endpoint; the nearest noun
 entity to the gripper is selected when normalized distance is at most `0.08`.
 Otherwise it uses the gripper points as a fallback. The selected start-frame
-points are tracked forward for the final third-person goal tracks.
+points reuse their candidate trajectories for the final third-person goal tracks.
 
 POV processing samples one shared set of candidate points, tracks them only
 through each stage's final 30 frames, selects points across the shared stage
@@ -400,4 +400,72 @@ python src/tapnetGrab.py --task tasks/pick_place_task.npz --mode servo_print --c
 python src/tapnetGrabGoal.py --task tasks/pick_place_task.npz --mode robot --undistort --camera 0 --port COM3
 #    or hybrid GrabGoal → greedy refine:
 python src/tapnetGrabGreedy.py --task tasks/pick_place_task.npz --mode robot --undistort --camera 0 --port COM3
+```
+
+## View uploaded Molmo point training data
+
+Browse `kdaterao/so101_molmo2_gripper_preprocessed` with its human-labeled point
+on each image. Filter by split, camera, and episode; use previous/next, arrow keys,
+random sampling, or a sample number. Toggle the overlay to inspect the raw image.
+The viewer displays normalized and pixel coordinates and never edits the dataset.
+
+```bash
+python3 -m pip install -r requirements-dataset-viewer.txt
+hf auth login  # required if the dataset is private
+python3 scripts/view_molmo_so101_dataset.py --open-browser
+```
+
+Open `http://127.0.0.1:8765`. The first run downloads the dataset to the normal
+Hugging Face cache; images are decoded on demand. No GPU or model is needed.
+Point conversion uses the same image width/height as the dataset preparation
+script, and the image and overlay resize together to avoid display offsets.
+
+For a headless VM, start the viewer there without `--open-browser`. On your own
+computer, forward the port using your usual SSH host/address:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 ubuntu@YOUR_VM_HOST
+```
+
+Then open `http://127.0.0.1:8765` on your own computer. Optional flags:
+`--repo-id USER/DATASET`, `--revision REVISION`, `--config NAME`, and `--port 8766`.
+This viewer is for the labeled-image dataset, not the clustered LeRobot videos.
+
+
+## Faster episode preprocessing
+
+The grounded preprocessing entrypoint reads state/actions/task text directly
+from the episode table. In its clustering pass it decodes only wrist tail
+windows (plus frame 0 for the resolution check), rather than every frame of all
+three cameras. The second pass decodes full camera streams in uint8 batches,
+with one seek per batch rather than per frame. Episode timestamp offsets,
+padding masks, and the existing full-stage tracking behavior are retained.
+
+Third-person selection reuses the chosen candidate trajectories instead of
+running TAPIR through the same stage again. The script logs metadata, camera
+decoding, Molmo query, stage, and episode durations. `--dry-run` reads metadata
+without decoding camera videos or loading models.
+
+```bash
+bash scripts/preprocess_so101_grounded.sh --decode-batch-size 64
+```
+
+`--decode-batch-size` defaults to 64. Larger batches reduce seeks but consume
+more CPU RAM while decoding. On the RTX A6000, optional TF32 acceleration can
+speed up CUDA FP32 operations; it can slightly change tracks:
+
+```bash
+bash scripts/preprocess_so101_grounded.sh --tapir-tf32
+```
+
+For an interrupted destination, add `--resume`; already-written episodes are
+skipped in the rendering pass. Tail clustering still includes all selected
+episodes to preserve cross-demo selection. Downloaded source files and models
+use the Hugging Face cache. First-run metadata downloading and rate-limit
+backoffs are separate from GPU tracking performance.
+
+Regression checks for sparse/batched decoding and selected-track reuse:
+
+```bash
+python tests/test_grounded_preprocess_speed.py
 ```
