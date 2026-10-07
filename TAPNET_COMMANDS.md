@@ -261,19 +261,24 @@ bash scripts/train_molmo_so101.sh
 
 The command uses the label maker's default dataset, `kdaterao/so101_locate_gripper`.
 It downloads `point_labels.jsonl` and its referenced images, makes an
-episode-disjoint 90/10 train/validation split, downloads Molmo-7B-D-0924, and
-trains on the SO-101 points only. It does not download the unrelated general
-PixMo images. It consumes user-clicked point labels; it does not reinterpret
-the bounding boxes in `labels.jsonl`. Checkpoints go under
-`molmo_so101_run/checkpoints/so101_molmo/` by default.
+episode-disjoint 90/10 train/validation split, downloads MolmoE-1B-0924 by
+default, and trains on the SO-101 points only. MolmoE-1B is a mixture-of-experts
+model with 1.5B active and 7.2B total parameters, so its active compute is
+smaller while total weight memory remains comparable to a 7B model. Training
+also installs Megablocks. Set `SO101_MOLMO_MODEL=Molmo-7B-D-0924` to use the
+previous model. The script does not download unrelated PixMo images. It uses
+user-clicked point labels; it does not reinterpret the boxes in `labels.jsonl`.
+The tuned connector weights are saved to
+`molmo_so101_run/checkpoints/so101_molmo/so101_connector.pt` by default; the
+base Molmo checkpoint is still needed alongside this adapter.
 
 This is configured for one GPU and updates the vision-language connector while
-freezing the 7B language model and vision encoder to fit a more modest GPU. It
-is a Molmo fine-tuning run, but not full-parameter tuning. The launcher prints
-the available GPU and warns below 32 GiB VRAM; actual memory needs depend on
-the card and CUDA/PyTorch build. Start with the default 500 steps, then increase
-`SO101_MAX_DURATION` after inspecting the run. Set `HF_TOKEN` if the dataset is
-private.
+freezing the language model and vision encoder. It is connector fine-tuning,
+not full-parameter tuning. To avoid the single-GPU checkpoint-copy OOM, it
+saves the connector adapter once at the end and does not write mid-run resume
+checkpoints. The launcher prints the available GPU and warns below 32 GiB VRAM.
+Start with 500 steps and set `SO101_MAX_DURATION` to change it. Set `HF_TOKEN`
+if the dataset is private.
 
 Useful overrides:
 

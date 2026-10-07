@@ -8,11 +8,28 @@ WORK_ROOT="${SO101_MOLMO_WORKDIR:-${REPO_ROOT}/molmo_so101_run}"
 DATA_CACHE="${SO101_DATA_CACHE:-${WORK_ROOT}/hub_dataset}"
 PREPARED_DATA="${SO101_PREPARED_DATA:-${WORK_ROOT}/prepared_dataset}"
 MOLMO_DATA_DIR="${MOLMO_DATA_DIR:-${WORK_ROOT}/molmo_data}"
-CHECKPOINT_CACHE="${MOLMO_CHECKPOINT_ARCHIVE:-${WORK_ROOT}/Molmo-7B-D-0924.tar}"
-CHECKPOINT_DIR="${MOLMO_CHECKPOINT_DIR:-${WORK_ROOT}/Molmo-7B-D-0924}"
+MOLMO_MODEL="${SO101_MOLMO_MODEL:-MolmoE-1B-0924}"
+CHECKPOINT_CACHE="${MOLMO_CHECKPOINT_ARCHIVE:-${WORK_ROOT}/${MOLMO_MODEL}.tar}"
+CHECKPOINT_DIR="${MOLMO_CHECKPOINT_DIR:-${WORK_ROOT}/${MOLMO_MODEL}}"
 SAVE_FOLDER="${SO101_SAVE_FOLDER:-${WORK_ROOT}/checkpoints/so101_molmo}"
 DATASET_REPO="${SO101_DATASET_REPO:-kdaterao/so101_locate_gripper}"
 MAX_DURATION="${SO101_MAX_DURATION:-500}"
+
+case "${MOLMO_MODEL}" in
+  MolmoE-1B-0924)
+    CHECKPOINT_URL="https://storage.googleapis.com/oe-training-public/Molmo-0924/MolmoE-1B-0924.tar"
+    NEEDS_MEGABLOCKS=1
+    ;;
+  Molmo-7B-D-0924)
+    CHECKPOINT_URL="https://storage.googleapis.com/oe-training-public/Molmo-0924/Molmo-7B-D-0924.tar"
+    NEEDS_MEGABLOCKS=0
+    ;;
+  *)
+    echo "Unsupported SO101_MOLMO_MODEL: ${MOLMO_MODEL}" >&2
+    echo "Supported values: MolmoE-1B-0924, Molmo-7B-D-0924" >&2
+    exit 2
+    ;;
+esac
 
 # A prior startup can leave config.yaml behind before step 1 is checkpointed.
 # Preserve that directory and start into a fresh one instead of overwriting it.
@@ -50,7 +67,7 @@ if not torch.cuda.is_available():
 props = torch.cuda.get_device_properties(0)
 print(f"Using one GPU: {props.name}, {props.total_memory / 1024**3:.1f} GiB VRAM")
 if props.total_memory < 32 * 1024**3:
-    print("WARNING: Molmo-7B connector fine-tuning may exceed this GPU's memory.")
+    print("WARNING: Molmo connector fine-tuning may exceed this GPU's memory.")
 PY
 
 mkdir -p "${WORK_ROOT}" "${MOLMO_DATA_DIR}"
@@ -200,6 +217,9 @@ PY
 python3 -m pip install --upgrade pip
 python3 -m pip install 'transformers==4.57.1' 'huggingface_hub<1.0'
 python3 -m pip install -e "${MOLMO_REPO_ROOT}[train]"
+if [[ "${NEEDS_MEGABLOCKS}" == "1" ]]; then
+  python3 -m pip install 'git+https://github.com/Muennighoff/megablocks.git@olmoe'
+fi
 
 export MOLMO_DATA_DIR
 export SO101_POINT_DATA_ROOT="${PREPARED_DATA}"
@@ -214,9 +234,9 @@ if [[ -n "${CONFIG_FILE}" ]]; then
   CHECKPOINT_DIR="$(dirname "${CONFIG_FILE}")"
 else
   if [[ ! -f "${CHECKPOINT_CACHE}" ]]; then
-    echo "Downloading Molmo-7B-D-0924 training checkpoint..."
+    echo "Downloading ${MOLMO_MODEL} training checkpoint..."
     curl --fail --location --retry 5 --retry-delay 2 \
-      "https://storage.googleapis.com/oe-training-public/Molmo-0924/Molmo-7B-D-0924.tar" \
+      "${CHECKPOINT_URL}" \
       --output "${CHECKPOINT_CACHE}"
   fi
   mkdir -p "${CHECKPOINT_DIR}"
@@ -234,6 +254,7 @@ export PYTHONPATH="${MOLMO_REPO_ROOT}:${PYTHONPATH:-}"
 export WANDB_MODE="disabled"
 
 echo "Starting single-GPU SO-101 Molmo fine-tuning"
+echo "  model:      ${MOLMO_MODEL}"
 echo "  checkpoint: ${CHECKPOINT_DIR}"
 echo "  dataset:    ${DATASET_REPO}"
 echo "  train rows: $(wc -l < "${PREPARED_DATA}/train.jsonl" | tr -d ' ')"
