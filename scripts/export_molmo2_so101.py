@@ -70,6 +70,19 @@ def load_connector(path: Path) -> dict:
                 dist.destroy_process_group()
 
 
+class CompatibleCheckpointReader(dcp.FileSystemReader):
+    """Handle storage records written before PyTorch added stream transforms."""
+
+    def read_metadata(self, *args, **kwargs):
+        metadata = super().read_metadata(*args, **kwargs)
+        for info in (metadata.storage_data or {}).values():
+            if not hasattr(info, "transform_descriptors"):
+                # Legacy Molmo2 shards contain ordinary torch.save tensors,
+                # with no compression or other stream transforms.
+                object.__setattr__(info, "transform_descriptors", None)
+        return metadata
+
+
 def open_base_checkpoint(root: Path):
     """Return parameter shapes and a lazy reader for native Molmo2 weights."""
     unsharded = list(root.rglob("model.pt"))
@@ -82,7 +95,7 @@ def open_base_checkpoint(root: Path):
         return source, shapes, lambda name: state[name]
     if not unsharded and len(sharded) == 1:
         source = sharded[0].parent
-        reader = dcp.FileSystemReader(str(source))
+        reader = CompatibleCheckpointReader(str(source))
         metadata = reader.read_metadata()
         specs = {
             name.removeprefix("model."): spec
@@ -121,13 +134,18 @@ def main() -> None:
     parser.add_argument("--repo-id", help="Upload the finished model to this HF model repository")
     parser.add_argument("--private", action="store_true", help="Create a private repository")
     parser.add_argument("--base-hf-revision", default="main")
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse metadata from an export that failed before writing weight shards")
     args = parser.parse_args()
 
     if not args.connector.is_file():
         raise FileNotFoundError(args.connector)
     output = args.output_dir.resolve()
     if output.exists() and any(output.iterdir()):
-        raise ValueError(f"Export directory is not empty: {output}; choose a new --output-dir")
+        if not args.resume:
+            raise ValueError(f"Export directory is not empty: {output}; use --resume if no weights were written, or choose a new --output-dir")
+        if list(output.glob("*.safetensors")) or (output / "model.safetensors.index.json").exists():
+            raise ValueError("This export already contains weights; choose a new --output-dir or upload the completed export with hf upload")
 
     connector = load_connector(args.connector)
     base_source, base_shapes, read_base = open_base_checkpoint(args.base_checkpoint)

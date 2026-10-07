@@ -289,6 +289,9 @@ export is approximately 9 GB; allow that much additional disk space. It runs
 on CPU without loading the model into GPU memory. The original checkpoint and
 connector remain available. Use `--base-checkpoint`, `--connector`, and
 `--output-dir` for nondefault paths; the output directory must be empty.
+If export failed before writing weight shards, add `--resume` to reuse its
+metadata-only output directory. Legacy distributed checkpoint storage records
+are adapted in memory for newer PyTorch readers.
 `--repo-id` can upload directly after export. After an interrupted upload,
 rerun `hf upload` using the finished export directory.
 
