@@ -174,7 +174,9 @@ python3 "${REPO_ROOT}/scripts/prepare_molmo_so101.py" \
   --output-dir "${PREPARED_DATA}"
 
 CONFIG_FILE="$(find "${CHECKPOINT_DIR}" -name config.yaml -type f -print -quit 2>/dev/null || true)"
-if [[ -z "${CONFIG_FILE}" ]]; then
+if [[ -n "${CONFIG_FILE}" ]]; then
+  CHECKPOINT_DIR="$(dirname "${CONFIG_FILE}")"
+else
   if [[ ! -f "${CHECKPOINT_CACHE}" ]]; then
     echo "Downloading Molmo-7B-D-0924 training checkpoint..."
     curl --fail --location --retry 5 --retry-delay 2 \
