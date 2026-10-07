@@ -1,4 +1,4 @@
-"""Build POV-clustered and third-person MolmoPoint-grounded SmolVLA data.
+"""Build POV-clustered and third-person Molmo-grounded SmolVLA data.
 
 POV points are selected across demonstrations from their stage-tail tracks and
 then tracked backward through each full stage. Third-person points are grounded
@@ -35,6 +35,7 @@ from hf_preprocess_smolvla import (
     _save_progress,
 )
 from molmo_point_worker import MolmoPointWorker
+from molmo2_worker import Molmo2Worker
 from robotap import (
     Stage,
     events_from_gripper_thresholds,
@@ -55,7 +56,7 @@ if LEROBOT_SRC.is_dir() and str(LEROBOT_SRC) not in sys.path:
     sys.path.insert(0, str(LEROBOT_SRC))
 
 DEFAULT_DST = "kdaterao/community_v3_ee_smolvla_molmo_grounded"
-DEFAULT_MOLMO = "allenai/MolmoPoint-8B"
+DEFAULT_MOLMO = "allenai/Molmo2-4B"
 GRIPPER_QUERY = "robot gripper"
 
 
@@ -216,7 +217,7 @@ def _select_pov_points(
 
 def _ground_and_track_camera(
     tapir: BootsTAPIR,
-    molmo: MolmoPointWorker,
+    molmo: MolmoPointWorker | Molmo2Worker,
     frames: list[np.ndarray],
     masks: np.ndarray,
     stage: Stage,
@@ -385,8 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--src-repo-id", default=DEFAULT_SRC)
     p.add_argument("--dst-repo-id", default=DEFAULT_DST)
     p.add_argument("--episodes", default=None, help="e.g. 0-9 or 0,1,5")
-    p.add_argument("--molmo-model", default=DEFAULT_MOLMO, help="MolmoPoint HF id or local converted checkpoint")
-    p.add_argument("--molmo-dtype", default="auto", choices=["auto", "bf16", "fp16", "fp32"])
+    p.add_argument("--molmo-model", default=DEFAULT_MOLMO, help="Base HF model ID or local Transformers checkpoint")
+    p.add_argument("--molmo-backend", choices=["molmo2", "molmopoint"], default="molmo2")
+    p.add_argument("--molmo-connector", type=Path, help="Local trusted so101_connector.pt; overrides Hub download")
+    p.add_argument("--molmo-connector-repo", default="kdaterao/so101-molmo2-4b-gripper")
+    p.add_argument("--molmo-connector-revision", default="main")
+    p.add_argument("--molmo-dtype", default="bf16", choices=["auto", "bf16", "fp16", "fp32"])
     p.add_argument("--device", default=None)
     p.add_argument("--spacy-model", default="en_core_web_sm")
     p.add_argument("--max-task-objects", type=int, default=8)
@@ -477,7 +482,14 @@ def main() -> None:
         raise SystemExit(f"spaCy model {args.spacy_model!r} not installed. Run: python -m spacy download {args.spacy_model}") from exc
 
     tapir = BootsTAPIR(checkpoint=args.tapnet_checkpoint, device=args.device)
-    molmo = MolmoPointWorker(args.molmo_model, device=args.device, dtype=args.molmo_dtype)
+    if args.molmo_backend == "molmo2":
+        molmo = Molmo2Worker(
+            args.molmo_model, device=args.device, dtype=args.molmo_dtype,
+            connector_path=args.molmo_connector, connector_repo=args.molmo_connector_repo,
+            connector_revision=args.molmo_connector_revision,
+        )
+    else:
+        molmo = MolmoPointWorker(args.molmo_model, device=args.device, dtype=args.molmo_dtype)
 
     # Pass 1: track shared POV queries only through each stage's short tail.
     stage_lists: list[list[Stage]] = []
@@ -611,6 +623,13 @@ def main() -> None:
                     "active_points_end": end_points.tolist(),
                     "tracks": back_tracks.tolist(), "visibility": back_vis.tolist(),
                 },
+                "grounding_model": {
+                    "backend": args.molmo_backend, "base": args.molmo_model,
+                    "connector": str(args.molmo_connector or args.molmo_connector_repo)
+                    if args.molmo_backend == "molmo2" else None,
+                    "connector_revision": args.molmo_connector_revision
+                    if args.molmo_backend == "molmo2" and not args.molmo_connector else None,
+                },
                 "third_person": third,
             }
             episode_records.append(stage_record)
@@ -692,7 +711,7 @@ def main() -> None:
     if dst is not None:
         dst.finalize()
         if args.push_to_hub:
-            dst.push_to_hub(branch="main", tags=["robotics", "smolvla", "tapnet", "molmopoint"], license="apache-2.0", push_videos=True)
+            dst.push_to_hub(branch="main", tags=["robotics", "smolvla", "tapnet", args.molmo_backend], license="apache-2.0", push_videos=True)
             sidecar_root = args.sidecar_dir or (dst_root / "point_tracks")
             if sidecar_root.is_dir():
                 from huggingface_hub import HfApi

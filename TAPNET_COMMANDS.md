@@ -209,11 +209,11 @@ Stages without a task, valid Vesta goals, or a real stage-end camera frame are
 reported and receive no third-person goal overlay. `--cluster-tail-frames` applies
 per stage; shorter stages use their full available length.
 
-## HF SmolVLA preprocessing with MolmoPoint + spaCy
+## Episode video preprocessing with Molmo2 + spaCy
 
 `src/hf_preprocess_smolvla_grounded.py` is the point-grounding data-generation
 entrypoint. It extracts task noun phrases with spaCy, adds `robot gripper`, and
-uses MolmoPoint on each available top/side camera at every subtask start. TAPIR
+uses Molmo2 with the SO-101 connector on each available top/side camera at every subtask start. TAPIR
 tracks all candidate points forward to the subtask endpoint; the nearest noun
 entity to the gripper is selected when normalized distance is at most `0.08`.
 Otherwise it uses the gripper points as a fallback. The selected start-frame
@@ -225,24 +225,53 @@ prefix with RoboTAP funneling/clustering, then tracks selected endpoint points
 backward through each full stage. Extra stages are selected per episode when
 episode stage counts differ.
 
-Install the extras and spaCy English model:
+On a fresh Ubuntu RTX A6000 VM, install the inference/video packages and run:
 
 ```bash
-pip install -r requirements-molmo-grounding.txt
-python -m spacy download en_core_web_sm
+bash packages-grounded-preprocess.sh
+source .venv-grounded/bin/activate
+hf auth login
+bash scripts/preprocess_so101_grounded.sh
 ```
 
-Run a small dataset slice:
+The launcher processes episodes **0–2** of
+`felsager/community_dataset_v3_ee_smolVLA` and uploads the resulting LeRobot
+videos/data to `kdaterao/community_v3_ee_smolvla_molmo_grounded`.
+It downloads the TAPIR checkpoint, the official `allenai/Molmo2-4B` HF base,
+and `so101_connector.pt` from `kdaterao/so101-molmo2-4b-gripper` as needed.
+The base download is cached locally and is separate from the native SFT archive
+used for training. Your full fine-tuned model does not need to be exported or
+uploaded. This entrypoint runs inference only.
+
+Choose another episode slice and output dataset:
 
 ```bash
-python src/hf_preprocess_smolvla_grounded.py \
-  --episodes 0-2 --dst-repo-id kdaterao/molmo_grounded_smoke \
-  --cluster-tail-frames 30 --viz-dir outputs/molmo_grounded_viz
+SO101_EPISODES=3-5 SO101_DST_REPO=kdaterao/so101_grounded_test \
+  bash scripts/preprocess_so101_grounded.sh --viz-dir outputs/grounded_viz
 ```
 
-Use `--dry-run` to inspect gripper-based stage boundaries without loading
-MolmoPoint or TAPIR. The default model is `allenai/MolmoPoint-8B`; pass
-`--molmo-model <local-or-HF-checkpoint>` to use a converted custom checkpoint.
+Pass `--resume` to continue an existing destination, or
+`--molmo-connector /absolute/path/so101_connector.pt` to use your local connector.
+The connector loader accepts the trusted single-GPU PyTorch checkpoint from our
+training script, removes training wrappers, and rejects missing/extra tensors or
+shape mismatches. It applies all connector weights, including new token embeddings,
+once when loading the model. Molmo2 output coordinates are decoded at scale 1000
+and converted to source-image pixels before TAPIR tracking.
+
+Use `--dry-run` to inspect gripper-based stage boundaries without loading models
+or writing a dataset. To run locally without uploading, call the Python entrypoint
+without `--push-to-hub`:
+
+```bash
+python src/hf_preprocess_smolvla_grounded.py --episodes 0-2 \
+  --dst-repo-id kdaterao/grounded_local --molmo-dtype bf16
+```
+
+The legacy MolmoPoint backend is still available with
+`--molmo-backend molmopoint --molmo-model allenai/MolmoPoint-8B`.
+`scripts/prepare_molmo2_so101_data.sh` prepares labeled images for VLM training;
+`scripts/preprocess_so101_grounded.sh` processes robot episode videos.
+
 Per-subtask records, including raw Molmo responses, selected entity, distance,
 tracks, visibility, and failure reasons, are written to
 `<dataset-cache>/point_tracks/epNNNNNN.json`. The same selected tracks are
