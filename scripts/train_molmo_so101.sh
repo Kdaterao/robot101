@@ -14,6 +14,13 @@ SAVE_FOLDER="${SO101_SAVE_FOLDER:-${WORK_ROOT}/checkpoints/so101_molmo}"
 DATASET_REPO="${SO101_DATASET_REPO:-kdaterao/so101_locate_gripper}"
 MAX_DURATION="${SO101_MAX_DURATION:-500}"
 
+# A prior startup can leave config.yaml behind before step 1 is checkpointed.
+# Preserve that directory and start into a fresh one instead of overwriting it.
+if [[ -f "${SAVE_FOLDER}/config.yaml" && ! -e "${SAVE_FOLDER}/latest" && ! -L "${SAVE_FOLDER}/latest" ]]; then
+  SAVE_FOLDER="${SAVE_FOLDER}_retry_$(date +%Y%m%d_%H%M%S)"
+  echo "Existing run has no latest checkpoint; using fresh output directory: ${SAVE_FOLDER}"
+fi
+
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "Run this script on your Linux NVIDIA compute machine." >&2
   exit 2
