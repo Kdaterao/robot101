@@ -247,6 +247,41 @@ Per-subtask records, including raw Molmo responses, selected entity, distance,
 tracks, visibility, and failure reasons, are written to
 `<dataset-cache>/point_tracks/epNNNNNN.json`. The same selected tracks are
 rendered into wrist and third-person heatmaps in the LeRobot output dataset.
+
+## Fine-tune Molmo on SO-101 gripper points
+
+The workspace includes the original AllenAI Molmo training repository under
+`molmo/`. On a Linux NVIDIA compute machine with that workspace available, run:
+
+```bash
+bash scripts/train_molmo_so101.sh
+```
+
+The command uses the label maker's default dataset, `kdaterao/so101_locate_gripper`.
+It downloads `point_labels.jsonl` and its referenced images, makes an
+episode-disjoint 90/10 train/validation split, downloads Molmo-7B-D-0924 and
+general PixMo point examples, and starts the native Molmo trainer with a
+50/50 general/SO-101 pointing mixture. It consumes user-clicked point labels;
+it does not reinterpret the bounding boxes in `labels.jsonl`. Checkpoints go
+under `molmo_so101_run/checkpoints/so101_molmo/` by default.
+
+This is configured for one GPU and updates the vision-language connector while
+freezing the 7B language model and vision encoder to fit a more modest GPU. It
+is a Molmo fine-tuning run, but not full-parameter tuning. The launcher prints
+the available GPU and warns below 32 GiB VRAM; actual memory needs depend on
+the card and CUDA/PyTorch build. Start with the default 500 steps, then increase
+`SO101_MAX_DURATION` after inspecting the run. Set `HF_TOKEN` if the dataset is
+private.
+
+Useful overrides:
+
+```bash
+SO101_DATASET_REPO=owner/dataset SO101_MAX_DURATION=1000 \
+SO101_MOLMO_WORKDIR=/scratch/molmo bash scripts/train_molmo_so101.sh
+```
+
+The source labels stay grouped by episode during splitting so frames from one
+episode cannot leak across train and validation.
 | `--lookahead` / `--end-frac` | … | **tapnetGrab only** (demo trajectory following) |
 | `--advance-progress` | 0 | **tapnetGrab** — optional progress escape (0 = stop on pixel error only) |
 | `--depth` | 0.20 m | assumed Z for analytical Jacobian (`tapnetGrabGoal` / Pose / Greedy hybrid) |
