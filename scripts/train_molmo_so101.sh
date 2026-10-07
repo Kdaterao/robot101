@@ -218,7 +218,29 @@ python3 -m pip install --upgrade pip
 python3 -m pip install 'transformers==4.57.1' 'huggingface_hub<1.0'
 python3 -m pip install -e "${MOLMO_REPO_ROOT}[train]"
 if [[ "${NEEDS_MEGABLOCKS}" == "1" ]]; then
-  python3 -m pip install 'git+https://github.com/Muennighoff/megablocks.git@olmoe'
+  CUDA_BUILD_HOME="${SO101_CUDA_HOME:-${CUDA_HOME:-/usr/local/cuda}}"
+  if [[ ! -x "${CUDA_BUILD_HOME}/bin/nvcc" ]]; then
+    echo "CUDA compiler not found at ${CUDA_BUILD_HOME}/bin/nvcc." >&2
+    echo "MolmoE needs Megablocks compiled with nvcc. Install the CUDA toolkit matching PyTorch, then set SO101_CUDA_HOME to its root." >&2
+    echo "Current PyTorch CUDA build: $(python3 -c 'import torch; print(torch.version.cuda)')" >&2
+    echo "For example, if nvcc is at /usr/local/cuda-13.0/bin/nvcc, run:" >&2
+    echo "  export SO101_CUDA_HOME=/usr/local/cuda-13.0" >&2
+    exit 2
+  fi
+  CUDA_VERSION="$("${CUDA_BUILD_HOME}/bin/nvcc" --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | tail -n 1)"
+  TORCH_CUDA_VERSION="$(python3 -c 'import torch; print(torch.version.cuda or "")')"
+  if [[ -z "${CUDA_VERSION}" || "${CUDA_VERSION%%.*}" != "${TORCH_CUDA_VERSION%%.*}" ]]; then
+    echo "CUDA compiler ${CUDA_VERSION:-unknown} does not match PyTorch CUDA ${TORCH_CUDA_VERSION:-unknown}." >&2
+    echo "Install a matching CUDA toolkit or use a PyTorch build for the installed toolkit." >&2
+    exit 2
+  fi
+  export CUDA_HOME="${CUDA_BUILD_HOME}"
+  export PATH="${CUDA_BUILD_HOME}/bin:${PATH}"
+  export LD_LIBRARY_PATH="${CUDA_BUILD_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+  echo "Building Megablocks with PyTorch CUDA ${TORCH_CUDA_VERSION} and nvcc ${CUDA_VERSION}"
+  # Avoid pip's isolated build environment selecting a different CUDA PyTorch
+  # wheel than the one used for this training run.
+  python3 -m pip install --no-build-isolation 'git+https://github.com/Muennighoff/megablocks.git@olmoe'
 fi
 
 export MOLMO_DATA_DIR

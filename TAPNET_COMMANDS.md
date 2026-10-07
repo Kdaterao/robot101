@@ -250,45 +250,44 @@ rendered into wrist and third-person heatmaps in the LeRobot output dataset.
 
 ## Fine-tune Molmo on SO-101 gripper points
 
-The workspace includes the original AllenAI Molmo training repository as the
-`molmo/` Git submodule. The launcher initializes it and installs the SO-101
-dataset adapter from this repository automatically. On a Linux NVIDIA compute
-machine, run:
+For the current run, use the Molmo2-4B SFT checkpoint and the official Molmo2
+training repo. The launcher clones a pinned Molmo2 revision into its work
+directory, installs the SO-101 point dataset adapter, and runs a one-GPU
+connector fine-tune. On a Linux NVIDIA compute machine, run:
 
 ```bash
-bash scripts/train_molmo_so101.sh
+bash scripts/train_molmo2_so101.sh
 ```
 
-The command uses the label maker's default dataset, `kdaterao/so101_locate_gripper`.
-It downloads `point_labels.jsonl` and its referenced images, makes an
-episode-disjoint 90/10 train/validation split, downloads MolmoE-1B-0924 by
-default, and trains on the SO-101 points only. MolmoE-1B is a mixture-of-experts
-model with 1.5B active and 7.2B total parameters, so its active compute is
-smaller while total weight memory remains comparable to a 7B model. Training
-also installs Megablocks. Set `SO101_MOLMO_MODEL=Molmo-7B-D-0924` to use the
-previous model. The script does not download unrelated PixMo images. It uses
-user-clicked point labels; it does not reinterpret the boxes in `labels.jsonl`.
-The tuned connector weights are saved to
-`molmo_so101_run/checkpoints/so101_molmo/so101_connector.pt` by default; the
-base Molmo checkpoint is still needed alongside this adapter.
+The command downloads the label maker's default dataset,
+`kdaterao/so101_locate_gripper`, and the Molmo2-4B SFT checkpoint. It uses
+`point_labels.jsonl` and its referenced images, makes an episode-disjoint 90/10
+train/validation split, and trains on those points only. It does not download
+unrelated Molmo2 or PixMo datasets, and does not reinterpret boxes in
+`labels.jsonl`. Training freezes the language model and vision encoder, updates
+the vision-language connector, uses batch size 1 with reduced image crops, and
+saves only tuned connector tensors to
+`molmo2_so101_run/checkpoints/so101_molmo2_4b/so101_connector.pt`. Keep the
+matching Molmo2-4B SFT checkpoint alongside that adapter for inference.
 
-This is configured for one GPU and updates the vision-language connector while
-freezing the language model and vision encoder. It is connector fine-tuning,
-not full-parameter tuning. To avoid the single-GPU checkpoint-copy OOM, it
-saves the connector adapter once at the end and does not write mid-run resume
-checkpoints. The launcher prints the available GPU and warns below 32 GiB VRAM.
-Start with 500 steps and set `SO101_MAX_DURATION` to change it. Set `HF_TOKEN`
-if the dataset is private.
+This is connector fine-tuning, not full-parameter tuning. It saves the adapter
+once at the end and skips full-model and optimizer checkpoints. Start with 500
+steps; set `SO101_MAX_DURATION` to change that. If the dataset is private, set
+`HF_TOKEN` before running.
 
 Useful overrides:
 
 ```bash
 SO101_DATASET_REPO=owner/dataset SO101_MAX_DURATION=1000 \
-SO101_MOLMO_WORKDIR=/scratch/molmo bash scripts/train_molmo_so101.sh
+SO101_MOLMO2_WORKDIR=/scratch/molmo2 bash scripts/train_molmo2_so101.sh
 ```
 
 The source labels stay grouped by episode during splitting so frames from one
 episode cannot leak across train and validation.
+
+The legacy `scripts/train_molmo_so101.sh` launcher remains available for the
+original Molmo 0924 checkpoints. MolmoE-1B requires Megablocks; Molmo-7B-D does
+not. The Molmo2-4B launcher avoids that MoE dependency.
 | `--lookahead` / `--end-frac` | … | **tapnetGrab only** (demo trajectory following) |
 | `--advance-progress` | 0 | **tapnetGrab** — optional progress escape (0 = stop on pixel error only) |
 | `--depth` | 0.20 m | assumed Z for analytical Jacobian (`tapnetGrabGoal` / Pose / Greedy hybrid) |
