@@ -271,6 +271,25 @@ saves only tuned connector tensors to
 `molmo2_so101_run/checkpoints/so101_molmo2_4b/so101_connector.pt`. Keep the
 matching Molmo2-4B SFT checkpoint alongside that adapter for inference.
 
+To publish a complete Transformers model with the connector merged into the
+base weights, run after training:
+
+```bash
+python3 scripts/export_molmo2_so101.py
+hf upload kdaterao/so101-molmo2-4b-gripper molmo2_so101_run/hf_model .
+```
+
+The exporter reads the original `model.pt` with memory mapping, merges all
+tuned tensors (including additional token embeddings), and writes BF16
+safetensors in approximately 2 GB shards. It downloads only the official
+Hugging Face tokenizer, processor, configs, and custom Python code. The full
+export is approximately 9 GB; allow that much additional disk space. It runs
+on CPU without loading the model into GPU memory. The original checkpoint and
+connector remain available. Use `--base-checkpoint`, `--connector`, and
+`--output-dir` for nondefault paths; the output directory must be empty.
+`--repo-id` can upload directly after export. After an interrupted upload,
+rerun `hf upload` using the finished export directory.
+
 This is connector fine-tuning, not full-parameter tuning. It saves the adapter
 once at the end and skips full-model and optimizer checkpoints. Start with 500
 steps; set `SO101_MAX_DURATION` to change that. If the dataset is private, set
