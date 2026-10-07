@@ -20,24 +20,31 @@ scipy>=1.10.0
 datasets>=2.21.0
 numpy>=1.26,<2
 
-# Eagle / LocateAnything helpers
+# Eagle / LocateAnything helpers (imports hit during train startup)
 shortuuid
 pydantic>=2.7,<2.8
 filetype
 bitstring
 ebmlite
 decord
+lmdb
+sortedcontainers
+pynvml
+nvidia-ml-py
 scikit-image
 imagehash
 opencv-python-headless
 python-dotenv
 huggingface_hub>=0.26
 Pillow>=10.0
+requests
+httpx
 
 # Optional but used by Eagle configs / logging
 wandb>=0.17.7
 tensorboard
 
 # Linux CUDA kernels (skip / may fail on unsupported GPUs)
+# Package name on PyPI is liger-kernel; import is liger_kernel.
 liger_kernel==0.3.1
 triton>=3.1.0

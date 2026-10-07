@@ -15,9 +15,11 @@ Installs CUDA torch, tapnet checkpoint, vendored lerobot/tapnet editables,
 
 ```bash
 # Fine-tune after setup (Eagle path printed by packages-locate.sh)
+source .venv/locate-eagle.env   # sets LAUNCHER=pytorch + PYTHONPATH (or rely on locate_finetune.py)
 python src/locate_finetune.py export
 python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --push-model-to-hub
 # if DeepSpeed fails: add --deepspeed none
+# Eagle defaults LAUNCHER=slurm — locate_finetune.py forces LAUNCHER=pytorch for torchrun
 ```
 
 ## A. Fine-tune LocateAnything on the SO-101 gripper

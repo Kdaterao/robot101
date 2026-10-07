@@ -272,11 +272,26 @@ def cmd_train(args: argparse.Namespace) -> None:
     elif "HF_TOKEN" not in env and "HUGGING_FACE_HUB_TOKEN" not in env:
         print("Warning: HF_TOKEN not set; model download may fail if gated/private.")
 
+    # Eagle's locany_finetune_magi_stream.py defaults LAUNCHER=slurm, which
+    # crashes with KeyError SLURM_PROCID under torch.distributed.run.
+    env["LAUNCHER"] = getattr(args, "launcher", None) or "pytorch"
+    # Ensure `import eaglevl` works even if Eagle was not pip-installed editable.
+    embodied = str(cwd)
+    prev_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = embodied if not prev_pp else f"{embodied}{os.pathsep}{prev_pp}"
+    # Drop leftover Slurm vars so dist_utils cannot auto-pick slurm paths.
+    for key in list(env):
+        if key.startswith("SLURM_"):
+            env.pop(key, None)
+
+    print(f"LAUNCHER={env['LAUNCHER']} PYTHONPATH includes {embodied}")
+
     log_path = Path(args.output_dir).resolve() / "training_log.txt"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Logging to {log_path}")
     with log_path.open("a", encoding="utf-8") as logf:
         logf.write(f"\n# cmd: {printable}\n")
+        logf.write(f"# LAUNCHER={env['LAUNCHER']}\n")
         proc = subprocess.run(cmd, cwd=str(cwd), env=env, stdout=logf, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
         raise SystemExit(f"Training failed with exit code {proc.returncode}. See {log_path}")
@@ -401,6 +416,12 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("--overwrite-output-dir", action="store_true")
     tp.add_argument("--hf-token", default=None)
     tp.add_argument("--dry-run", action="store_true", help="Print command only")
+    tp.add_argument(
+        "--launcher",
+        default="pytorch",
+        choices=["pytorch", "slurm", "mpi"],
+        help="Eagle dist launcher (default pytorch for torch.distributed.run; not slurm)",
+    )
     tp.add_argument(
         "--push-model-to-hub",
         action="store_true",

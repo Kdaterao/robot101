@@ -96,13 +96,28 @@ uv pip install -e "${EAGLE_EMBODIED}" --no-deps
 set +e
 uv pip install -r "requirements-locate-finetune.txt"
 FINETUNE_RC=$?
+# Explicit names users hit on A6000 VMs (also covered by the requirements file).
+uv pip install peft deepspeed lmdb decord sortedcontainers pynvml nvidia-ml-py
+uv pip install "liger-kernel==0.3.1" || uv pip install liger-kernel || true
 set -e
 if [[ "${FINETUNE_RC}" -ne 0 ]]; then
   echo "WARNING: requirements-locate-finetune.txt had install errors."
   echo "  Retry without optional kernels:"
   echo "  uv pip install transformers==4.57.1 tokenizers==0.22.0 sentencepiece==0.2.0 \\"
-  echo "    accelerate==1.5.2 peft==0.12.0 deepspeed==0.15.4 bitsandbytes decord wandb tensorboard"
+  echo "    accelerate==1.5.2 peft==0.12.0 deepspeed==0.15.4 bitsandbytes decord \\"
+  echo "    lmdb sortedcontainers pynvml wandb tensorboard"
 fi
+
+# Eagle train script defaults LAUNCHER=slurm; torchrun needs pytorch.
+export LAUNCHER=pytorch
+export PYTHONPATH="${EAGLE_EMBODIED}${PYTHONPATH:+:$PYTHONPATH}"
+# Persist for later shells in this project.
+mkdir -p .venv
+cat > .venv/locate-eagle.env <<EOF
+export LAUNCHER=pytorch
+export PYTHONPATH="${EAGLE_EMBODIED}\${PYTHONPATH:+:\$PYTHONPATH}"
+EOF
+echo "Wrote .venv/locate-eagle.env (source it in new shells before train)"
 
 echo "==> installing requirements-locate.txt (collect / Florence / preprocess)"
 uv pip install -r "requirements-locate.txt"
@@ -161,12 +176,15 @@ echo "Eagle root for locate_finetune:"
 echo "  ${EAGLE_EMBODIED}"
 echo ""
 echo "Fine-tune LocateAnything on locate_gripper:"
+echo "  source .venv/bin/activate"
+echo "  source .venv/locate-eagle.env   # LAUNCHER=pytorch + PYTHONPATH=Eagle/Embodied"
 echo "  # pull labels if needed:"
 echo "  hf download kdaterao/so101_locate_gripper --repo-type dataset --local-dir data/locate_gripper"
 echo "  python src/locate_finetune.py export"
 echo "  python src/locate_finetune.py train --eagle-root ${EAGLE_EMBODIED} --push-model-to-hub"
 echo "  # if DeepSpeed fails on this GPU:"
 echo "  python src/locate_finetune.py train --eagle-root ${EAGLE_EMBODIED} --deepspeed none --push-model-to-hub"
+echo "  # NOTE: do NOT use LAUNCHER=slurm with torch.distributed.run (KeyError SLURM_PROCID)"
 echo ""
 echo "Label / live / preprocess:"
 echo "  python src/locate_collect_label.py batch"
