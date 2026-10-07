@@ -1,26 +1,33 @@
 # SO-101 LocateAnything + SmolVLA TapNet preprocess
 
-## Setup (Linux CUDA VM)
+## Setup (Linux CUDA VM) — Florence-2 fine-tune
+
+```bash
+bash packages-florence.sh
+source .venv/bin/activate
+source .venv/florence.env          # PYTHONPATH=src, CUDA, HF, alloc conf
+hf auth login
+```
+
+Installs CUDA torch + `requirements-florence.txt` only (no Eagle / tapnet / deepspeed).
+Writes `.venv/florence.env` for every new shell.
+
+```bash
+python src/florence2_finetune.py train --dataset-repo kdaterao/so101_locate_gripper --push-to-hub
+# local: python src/florence2_finetune.py train --data-root data/locate_gripper
+```
+
+### Optional: full Locate / TapNet / Eagle stack
 
 ```bash
 bash packages-locate.sh
 source .venv/bin/activate
+source .venv/locate-eagle.env   # LAUNCHER=pytorch + Eagle PYTHONPATH
 hf auth login
 ```
 
-Installs CUDA torch, tapnet checkpoint, vendored lerobot/tapnet editables,
-`requirements-locate.txt`, **Eagle Embodied** (`third_party/Eagle`), and
-`requirements-locate-finetune.txt` (peft / deepspeed / sentencepiece / … for
-`locate_finetune.py train`). Does not replace `packages.sh` or `packages-tapnet-gpu.sh`.
-
-```bash
-# Fine-tune after setup (Eagle path printed by packages-locate.sh)
-source .venv/locate-eagle.env   # sets LAUNCHER=pytorch + PYTHONPATH (or rely on locate_finetune.py)
-python src/locate_finetune.py export
-python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --push-model-to-hub
-# if DeepSpeed fails: add --deepspeed none
-# Eagle defaults LAUNCHER=slurm — locate_finetune.py forces LAUNCHER=pytorch for torchrun
-```
+`packages-locate.sh` also pulls tapnet, lerobot, Eagle, and `requirements-locate-finetune.txt`.
+Not required for Florence-2 training.
 
 ## A. Label SO-101 gripper + fine-tune Florence-2
 
