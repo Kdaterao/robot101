@@ -94,15 +94,35 @@ def main() -> None:
         "        return So101GripperPoints(split)\n",
     )
 
-    replace_once(
-        sft,
-        "def get_training_mixture(name):\n",
-        "def get_training_mixture(name):\n"
-        "    if name == \"so101_point\":\n"
-        "        training_mixture = [[\"so101_points\", "
-        "[WeightedDataset(\"so101_gripper_points\", sampling_rate=1.0)], 1.0]]\n"
-        "    elif name == \"debug\":\n",
+    sft_text = sft.read_text(encoding="utf-8")
+    custom_mixture = (
+        '    if name == "so101_point":\n'
+        '        training_mixture = [["so101_points", '
+        '[WeightedDataset("so101_gripper_points", sampling_rate=1.0)], 1.0]]\n'
     )
+    broken_mixture = (
+        "def get_training_mixture(name):\n"
+        + custom_mixture
+        + '    elif name == "debug":\n'
+        + '    if name == "debug":\n'
+    )
+    fixed_mixture = (
+        "def get_training_mixture(name):\n"
+        + custom_mixture
+        + '    elif name == "debug":\n'
+    )
+    if broken_mixture in sft_text:
+        sft_text = sft_text.replace(broken_mixture, fixed_mixture, 1)
+        sft.write_text(sft_text, encoding="utf-8")
+    elif fixed_mixture not in sft_text:
+        original_mixture = (
+            'def get_training_mixture(name):\n'
+            '    if name == "debug":\n'
+        )
+        if original_mixture not in sft_text:
+            raise SystemExit(f"Expected Molmo2 mixture marker not found in {sft}")
+        sft_text = sft_text.replace(original_mixture, fixed_mixture, 1)
+        sft.write_text(sft_text, encoding="utf-8")
     replace_once(
         sft,
         "    if args.mixture == \"debug\":\n",
