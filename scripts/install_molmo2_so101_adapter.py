@@ -75,9 +75,32 @@ def main() -> None:
     get_dataset = repo / "olmo/data/get_dataset.py"
     sft = repo / "launch_scripts/sft.py"
     run_trainer = repo / "olmo/train/run_trainer.py"
-    for path in (get_dataset, sft, run_trainer):
+    preprocessor = repo / "olmo/models/molmo2/molmo2_preprocessor.py"
+    for path in (get_dataset, sft, run_trainer, preprocessor):
         if not path.is_file():
             raise SystemExit(f"Not an AllenAI Molmo2 training checkout: {repo}; missing {path.name}")
+
+    # The upstream SFT defaults reserve tokens for 128 video frames and five
+    # images. Allow video=None so our single-image launcher can disable video
+    # preprocessing instead of increasing the sequence length to fit it.
+    replace_once(
+        preprocessor,
+        "import dataclasses\n",
+        "import dataclasses\nfrom typing import Optional\n",
+    )
+    replace_once(
+        preprocessor,
+        "    video: VideoPreprocessorConfig = dataclasses.field(default_factory=VideoPreprocessorConfig)",
+        "    video: Optional[VideoPreprocessorConfig] = dataclasses.field(default_factory=VideoPreprocessorConfig)",
+    )
+    replace_once(
+        preprocessor,
+        "            video_preprocessor=self.video.build_video_preprocessor(tokenizer, image_preprocessor),",
+        "            video_preprocessor=(\n"
+        "                self.video.build_video_preprocessor(tokenizer, image_preprocessor)\n"
+        "                if self.video is not None else None\n"
+        "            ),",
+    )
 
     dataset_module.write_text(DATASET_SOURCE, encoding="utf-8")
     replace_once(

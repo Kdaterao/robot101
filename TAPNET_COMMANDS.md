@@ -265,7 +265,8 @@ The command downloads the label maker's default dataset,
 train/validation split, and trains on those points only. It does not download
 unrelated Molmo2 or PixMo datasets, and does not reinterpret boxes in
 `labels.jsonl`. Training freezes the language model and vision encoder, updates
-the vision-language connector, uses batch size 1 with reduced image crops, and
+the vision-language connector, uses batch size 1 with reduced image crops and
+a 1,024-token sequence limit, disables video and multi-image preprocessing, and
 saves only tuned connector tensors to
 `molmo2_so101_run/checkpoints/so101_molmo2_4b/so101_connector.pt`. Keep the
 matching Molmo2-4B SFT checkpoint alongside that adapter for inference.

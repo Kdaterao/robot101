@@ -116,8 +116,11 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
   --seq_len=1024 \
   --num_workers=2 \
   --prefetch_factor=2 \
+  --model.mm_preprocessor.video=null \
+  --model.mm_preprocessor.image.max_images=null \
   --model.mm_preprocessor.image.max_crops=2 \
   --model.mm_preprocessor.image.high_res_max_crops=4 \
+  --model.mm_preprocessor.image.p_high_res=0 \
   --ft_llm=false \
   --ft_vit=false \
   --ft_connector=true \
