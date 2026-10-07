@@ -64,12 +64,18 @@ def cmd_export(args: argparse.Namespace) -> None:
     recipe_path = data_root / "recipe.json"
 
     n = 0
+    skipped = 0
     with labels_path.open("r", encoding="utf-8") as src, sft_path.open("w", encoding="utf-8") as dst:
         for line in src:
             line = line.strip()
             if not line:
                 continue
             row = json.loads(line)
+            image_rel = row["image"].replace("\\", "/")
+            image_path = data_root / image_rel
+            if not image_path.is_file():
+                skipped += 1
+                continue
             phrase = row.get("phrase") or args.phrase
             box = row["box_xyxy"]
             if len(box) != 4:
@@ -82,13 +88,15 @@ def cmd_export(args: argparse.Namespace) -> None:
                     {"from": "human", "value": _human_prompt(phrase)},
                     {"from": "gpt", "value": _gpt_answer(phrase, box_tok)},
                 ],
-                "image": row["image"].replace("\\", "/"),
+                "image": image_rel,
             }
             dst.write(json.dumps(sample, ensure_ascii=False) + "\n")
             n += 1
 
     if n == 0:
-        raise SystemExit(f"No labels found in {labels_path}")
+        raise SystemExit(f"No labels with existing images found in {labels_path}")
+    if skipped:
+        print(f"Skipped {skipped} labels with missing image files")
 
     recipe = {
         "so101_gripper": {
@@ -139,6 +147,34 @@ def _cwd_for_eagle(train_script: Path) -> Path:
     return train_script.resolve().parents[2]
 
 
+def _gpu_supports_bf16() -> bool:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        # Ampere (8.0+) has solid bf16; Pascal/Turing do not.
+        major, _minor = torch.cuda.get_device_capability(0)
+        return major >= 8
+    except Exception:
+        return False
+
+
+def _resolve_deepspeed(args: argparse.Namespace, cwd: Path) -> str | None:
+    raw = getattr(args, "deepspeed", None)
+    if raw in (None, "", "none", "None", "null", False):
+        return None
+    deepspeed = str(raw)
+    ds_path = Path(deepspeed)
+    if ds_path.is_file():
+        return str(ds_path.resolve())
+    alt = cwd / deepspeed
+    if alt.is_file():
+        return str(alt.resolve())
+    print(f"Warning: deepspeed config not found at {deepspeed}; passing through anyway")
+    return deepspeed
+
+
 def build_train_command(args: argparse.Namespace) -> tuple[list[str], Path]:
     eagle_root = Path(args.eagle_root).resolve()
     train_script = _find_train_script(eagle_root)
@@ -151,28 +187,34 @@ def build_train_command(args: argparse.Namespace) -> tuple[list[str], Path]:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    deepspeed = args.deepspeed
-    if deepspeed:
-        ds_path = Path(deepspeed)
-        if not ds_path.is_file():
-            # resolve relative to Eagle Embodied cwd
-            alt = cwd / deepspeed
-            if alt.is_file():
-                deepspeed = str(alt)
-            else:
-                print(f"Warning: deepspeed config not found at {deepspeed}; passing through anyway")
+    deepspeed = _resolve_deepspeed(args, cwd)
+
+    # Precision: GTX 1070 Ti (Pascal) has no bf16 — use fp16 there.
+    precision = getattr(args, "precision", "auto") or "auto"
+    if precision == "auto":
+        precision = "bf16" if _gpu_supports_bf16() else "fp16"
+    use_bf16 = precision == "bf16"
+    use_fp16 = precision == "fp16"
 
     nproc = max(1, int(args.nproc_per_node))
     # Invoke via path relative to Embodied cwd so Eagle imports resolve.
     train_entry = "eaglevl/train/locany_finetune_magi_stream.py"
-    cmd = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        f"--nproc_per_node={nproc}",
-        "--master_port",
-        str(args.master_port),
-        train_entry,
+    # Windows: torch.distributed.run often fails (libuv). For 1 GPU, run the
+    # script directly and set RANK/WORLD_SIZE so Eagle's pytorch launcher works.
+    direct_single = bool(getattr(args, "direct", False)) or (os.name == "nt" and nproc == 1)
+    if direct_single:
+        cmd = [sys.executable, train_entry]
+    else:
+        cmd = [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            f"--nproc_per_node={nproc}",
+            "--master_port",
+            str(args.master_port),
+            train_entry,
+        ]
+    cmd.extend([
         "--model_name_or_path",
         args.model_name_or_path,
         "--max_steps",
@@ -204,7 +246,9 @@ def build_train_command(args: argparse.Namespace) -> tuple[list[str], Path]:
         "--dataloader_num_workers",
         str(args.dataloader_num_workers),
         "--bf16",
-        "True",
+        "True" if use_bf16 else "False",
+        "--fp16",
+        "True" if use_fp16 else "False",
         "--num_train_epochs",
         "1",
         "--per_device_train_batch_size",
@@ -239,10 +283,14 @@ def build_train_command(args: argparse.Namespace) -> tuple[list[str], Path]:
         args.report_to,
         "--mlp_connector_layers",
         "2",
-    ]
+    ])
     if deepspeed:
         cmd.extend(["--deepspeed", deepspeed])
 
+    print(
+        f"precision={precision} deepspeed={deepspeed!r} nproc={nproc} "
+        f"direct_single={direct_single}"
+    )
     return cmd, cwd
 
 
@@ -283,8 +331,21 @@ def cmd_train(args: argparse.Namespace) -> None:
     for key in list(env):
         if key.startswith("SLURM_"):
             env.pop(key, None)
+    # Windows torchrun/TCPStore: disable libuv (often missing in wheels).
+    env.setdefault("USE_LIBUV", "0")
+    env.setdefault("DIST_BACKEND", "gloo" if os.name == "nt" else "nccl")
+    # Single-process direct launch needs these for Eagle's pytorch init_dist.
+    if "RANK" not in env:
+        env["RANK"] = "0"
+        env["LOCAL_RANK"] = "0"
+        env["WORLD_SIZE"] = "1"
+        env["MASTER_ADDR"] = "127.0.0.1"
+        env["MASTER_PORT"] = str(args.master_port)
 
-    print(f"LAUNCHER={env['LAUNCHER']} PYTHONPATH includes {embodied}")
+    print(
+        f"LAUNCHER={env['LAUNCHER']} DIST_BACKEND={env.get('DIST_BACKEND')} "
+        f"USE_LIBUV={env.get('USE_LIBUV')} PYTHONPATH includes {embodied}"
+    )
 
     log_path = Path(args.output_dir).resolve() / "training_log.txt"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -402,15 +463,22 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument(
         "--max-seq-length",
         type=int,
-        default=4096,
-        help="Use ~4096 with sdpa; magi can go higher",
+        default=2048 if os.name == "nt" else 4096,
+        help="Use ~2048 on 8GB GPUs / Windows; ~4096 with sdpa; magi can go higher",
     )
     tp.add_argument("--use-llm-lora", type=int, default=64)
     tp.add_argument("--use-backbone-lora", type=int, default=0)
     tp.add_argument(
         "--deepspeed",
-        default="deepspeed_configs/zero_stage1_config.json",
-        help="DeepSpeed config path (relative to Embodied cwd ok). Pass 'none' to disable.",
+        default="none" if os.name == "nt" else "deepspeed_configs/zero_stage1_config.json",
+        help="DeepSpeed config path (relative to Embodied cwd ok). Pass 'none' to disable "
+        "(default none on Windows).",
+    )
+    tp.add_argument(
+        "--precision",
+        default="auto",
+        choices=["auto", "bf16", "fp16", "fp32"],
+        help="Training precision (auto: bf16 on Ampere+, else fp16 for Pascal/Turing)",
     )
     tp.add_argument("--report-to", default="tensorboard")
     tp.add_argument("--overwrite-output-dir", action="store_true")
@@ -421,6 +489,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="pytorch",
         choices=["pytorch", "slurm", "mpi"],
         help="Eagle dist launcher (default pytorch for torch.distributed.run; not slurm)",
+    )
+    tp.add_argument(
+        "--direct",
+        action="store_true",
+        help="Run train script without torch.distributed.run (default on Windows nproc=1)",
     )
     tp.add_argument(
         "--push-model-to-hub",

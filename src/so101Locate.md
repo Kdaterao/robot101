@@ -22,7 +22,7 @@ python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --pu
 # Eagle defaults LAUNCHER=slurm — locate_finetune.py forces LAUNCHER=pytorch for torchrun
 ```
 
-## A. Fine-tune LocateAnything on the SO-101 gripper
+## A. Label SO-101 gripper + fine-tune Florence-2
 
 ```bash
 # 0. Log in (avoids Hub 429 rate limits)
@@ -61,30 +61,25 @@ python src/locate_push_hf.py
 # or: python src/locate_collect_label.py push
 # or quit batch with: python src/locate_collect_label.py batch --push-to-hub
 
-# 2. Export for Eagle (after you have enough labels)
-python src/locate_finetune.py export
-# Export + push in one shot:
-python src/locate_finetune.py export --push-to-hub
+# 2. Fine-tune Florence-2 on that dataset (local folder or Hub)
+python src/florence2_finetune.py preview --data-root data/locate_gripper
+python src/florence2_finetune.py train --data-root data/locate_gripper
+# From Hub only (no local images needed):
+# python src/florence2_finetune.py train --dataset-repo kdaterao/so101_locate_gripper
+# 8GB smoke:
+# python src/florence2_finetune.py train --data-root data/locate_gripper --max-steps 1 --batch-size 1 --overwrite-output-dir
 
-# 3. Fine-tune (Eagle cloned by packages-locate.sh into third_party/Eagle)
-python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --dry-run
-python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --push-model-to-hub
-# python src/locate_finetune.py train --eagle-root third_party/Eagle/Embodied --deepspeed none --push-model-to-hub
+# 3. Push fine-tuned Florence checkpoint
+python src/florence2_finetune.py push --output-dir work_dirs/florence2_so101_gripper
+# or: ... train ... --push-to-hub
 
-# 4. Push fine-tuned ckpt to Hub (only the dataset was pushed before — not the model)
-python src/locate_finetune.py push-model --output-dir work_dirs/locate_so101_gripper
-# or train with: ... train --eagle-root ... --push-model-to-hub
-
-# 5. Smoke live grounding
-python src/testing2.py
-# Resolves: local work_dirs/locate_so101_gripper → Hub kdaterao/locate_so101_gripper
-# → nvidia/LocateAnything-3B (if neither fine-tune exists yet)
-
-# Optional A/B: Florence-2 instead of LocateAnything (LocateAnything kept intact)
+# 4. Smoke live grounding with Florence
 python src/testing2.py --locator florence2 --prompt "SO-101 gripper"
-# or microsoft/Florence-2-base / Florence-2-large-ft:
-# python src/testing2.py --locator florence2 --locate-model microsoft/Florence-2-base --prompt "robot gripper"
+# Resolves: local work_dirs/florence2_so101_gripper → Hub kdaterao/florence2_so101_gripper
+# → microsoft/Florence-2-large
 ```
+
+LocateAnything / Eagle fine-tune (`locate_finetune.py`) is optional and not required for the Florence path.
 
 ### Windows Hub download notes
 

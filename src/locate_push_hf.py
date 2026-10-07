@@ -79,10 +79,10 @@ recipe.json       # optional Eagle recipe pointing at this folder
 }}
 ```
 
-Collected with [`locate_collect_label.py`](https://github.com/) batch labeling; export with:
+Collected with [`locate_collect_label.py`](https://github.com/) batch labeling. Fine-tune Florence-2 with:
 
 ```bash
-python src/locate_finetune.py export --data-root .
+python src/florence2_finetune.py train --dataset-repo {repo_id}
 ```
 """
     readme.write_text(body, encoding="utf-8")

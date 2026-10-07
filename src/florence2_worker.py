@@ -16,7 +16,11 @@ from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 DEFAULT_FLORENCE_MODEL = "microsoft/Florence-2-large"
-# Preferred Hub id after you push a fine-tune (may not exist yet).
+DEFAULT_FLORENCE_HF = "kdaterao/florence2_so101_gripper"
+_DEFAULT_FLORENCE_LOCAL = (
+    Path(__file__).resolve().parent.parent / "work_dirs" / "florence2_so101_gripper"
+)
+# Preferred Hub id after you push a LocateAnything fine-tune (may not exist yet).
 DEFAULT_LOCATE_HF = "kdaterao/locate_so101_gripper"
 DEFAULT_LOCATE_BASE = "nvidia/LocateAnything-3B"
 _DEFAULT_LOCATE_LOCAL = (
@@ -46,6 +50,30 @@ def resolve_locate_model(explicit: str | None = None) -> str:
         pass
 
     return DEFAULT_LOCATE_BASE
+
+
+def resolve_florence_model(explicit: str | None = None) -> str:
+    """Pick fine-tuned Florence ckpt if present, else Microsoft base.
+
+    Order: explicit → local ``work_dirs/florence2_so101_gripper`` →
+    Hub ``kdaterao/florence2_so101_gripper`` → ``microsoft/Florence-2-large``.
+    """
+    if explicit:
+        return str(explicit)
+
+    local = _DEFAULT_FLORENCE_LOCAL
+    if (local / "config.json").is_file():
+        return str(local.resolve())
+
+    try:
+        from huggingface_hub import model_info
+
+        model_info(DEFAULT_FLORENCE_HF)
+        return DEFAULT_FLORENCE_HF
+    except Exception:
+        pass
+
+    return DEFAULT_FLORENCE_MODEL
 
 
 # Back-compat alias used by other scripts.
@@ -274,7 +302,7 @@ def load_locator(name: str, model_path: str | None = None, device: str = "cuda")
     """Factory: ``locateanything`` | ``florence2``."""
     key = (name or "locateanything").strip().lower()
     if key in ("florence2", "florence", "florence-2"):
-        path = model_path or DEFAULT_FLORENCE_MODEL
+        path = resolve_florence_model(model_path)
         print(f"Loading Florence-2 from {path}...")
         return Florence2Worker(path, device=device)
     if key in ("locateanything", "locate", "la"):
