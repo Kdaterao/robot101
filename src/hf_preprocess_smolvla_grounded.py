@@ -285,7 +285,7 @@ def _bridge_visibility_gaps(tracks, visible, masks, max_gap_frames):
     return tracks, visible
 
 
-def _ground_and_track_camera(
+def _ground_and_track_camera_pipeline(
     tapir: BootsTAPIR,
     molmo: MolmoPointWorker | Molmo2Worker,
     frames: list[np.ndarray],
@@ -392,11 +392,16 @@ def _ground_and_track_camera(
     tracking_started = perf_counter()
     sample_indices = _third_person_sample_indices(len(clip), fps, tracking_fps, stage_masks)
     try:
-        candidates, candidate_vis, _, _ = tapir.track_video(
-            [clip[i] for i in sample_indices], all_points, query_frame_index=0)
+        tracked = yield {"frames": [clip[i] for i in sample_indices],
+                         "query_xy": all_points, "label": label}
+        if isinstance(tracked, Exception):
+            raise tracked
+        candidates, candidate_vis = tracked
+        candidates[:, 0] = all_points
+        candidate_vis[:, 0] = True
         candidates, candidate_vis = _expand_sparse_tracks(candidates, candidate_vis, sample_indices, stage_masks)
-        print(f"  TAPIR {label}: {len(sample_indices)}/{len(clip)} frames at {tracking_fps:g} FPS / "
-              f"{len(all_points)} points in {perf_counter()-tracking_started:.1f}s", flush=True)
+        print(f"  TAPIR {label}: candidate results ready, {len(sample_indices)}/{len(clip)} frames "
+              f"at {tracking_fps:g} FPS / {len(all_points)} points", flush=True)
     except Exception as exc:
         return fallback(f"candidate_tracking_failed:{exc}")
     end_points, reaches_end = _last_endpoint(candidates, candidate_vis)
@@ -481,6 +486,97 @@ def _ground_and_track_camera(
     }
 
 
+def _ground_and_track_camera(*args, **kwargs):
+    """Compatibility path for a single camera; episode scheduling uses yields."""
+    pipeline = _ground_and_track_camera_pipeline(*args, **kwargs)
+    try:
+        job = next(pipeline)
+    except StopIteration as finished:
+        return finished.value
+    tapir = args[0] if args else kwargs["tapir"]
+    try:
+        tracked = tapir.track_video(job["frames"], job["query_xy"], query_frame_index=0)[:2]
+    except Exception as exc:
+        tracked = exc
+    try:
+        pipeline.send(tracked)
+    except StopIteration as finished:
+        return finished.value
+    raise RuntimeError("Unexpected additional camera tracking request")
+
+
+def _batch_episode_tracking(tapir, molmo, data, stages, tail_entries, selected_ids,
+                            epi, ep_idx, entities, args, fps):
+    """Ground cameras first, then schedule all independent episode clips."""
+    jobs, destinations, camera_pipelines = [], [], {}
+    backward, third, carry = {}, {}, {}
+    wrist = data["frames"][CAMERA_WRIST]
+    for si, stage in enumerate(stages):
+        ids = selected_ids.get((epi, si), np.zeros(0, np.int64))
+        if len(ids) and data["masks"][CAMERA_WRIST][stage.end]:
+            cache = tail_entries[si]
+            points = track_tail_endpoint(cache["tracks"][ids], cache["visible"][ids], n_tail=args.goal_tail_frames)
+            jobs.append({"frames": wrist[stage.start:stage.end + 1][::-1],
+                         "query_xy": points, "label": f"ep{ep_idx}/stage{si}/pov-back"})
+            destinations.append(("pov", si))
+        third[si] = {}
+        for cam in CAMERAS_3P:
+            if cam not in data["frames"]:
+                continue
+            pipeline = _ground_and_track_camera_pipeline(
+                tapir, molmo, data["frames"][cam], data["masks"][cam], stage,
+                entities, args.object_proximity_threshold, args.ambiguity_margin,
+                f"ep{ep_idx}/stage{si}/{cam}", fps=fps,
+                tracking_fps=args.third_person_tracking_fps,
+                visibility_gap_seconds=args.third_person_visibility_gap_seconds,
+            )
+            try:
+                job = next(pipeline)
+            except StopIteration as finished:
+                third[si][cam] = finished.value
+            else:
+                jobs.append(job)
+                destinations.append((cam, si))
+                camera_pipelines[(cam, si)] = pipeline
+    print(f"Tracking prepared episode {ep_idx}: {len(jobs)} independent segments", flush=True)
+    results = tapir.track_segments(jobs, segment_batch_size=args.tapir_segment_batch_size)
+    for destination, result in zip(destinations, results):
+        cam, si = destination
+        if cam == "pov":
+            if isinstance(result, Exception):
+                backward[si] = result
+            else:
+                tracks, visible = result
+                backward[si] = tracks[:, ::-1].copy(), visible[:, ::-1].copy()
+        else:
+            try:
+                camera_pipelines[destination].send(result)
+            except StopIteration as finished:
+                third[si][cam] = finished.value
+    # Carryover depends on the previous backward pass's actual endpoint, so
+    # run all carryover clips in one subsequent batch with independent states.
+    jobs, indices = [], []
+    if args.pov_track_previous_stage:
+        for si in range(1, len(stages)):
+            previous = backward.get(si - 1)
+            if previous is None or isinstance(previous, Exception):
+                continue
+            tracks, visible = previous
+            seeds = tracks[visible[:, -1] & np.isfinite(tracks[:, -1]).all(axis=1), -1][:args.num_poi_points]
+            seed_frame = stages[si - 1].end
+            if len(seeds) and data["masks"][CAMERA_WRIST][seed_frame]:
+                jobs.append({"frames": wrist[seed_frame:stages[si].end + 1],
+                             "query_xy": seeds, "label": f"ep{ep_idx}/stage{si}/pov-previous"})
+                indices.append(si)
+        results = tapir.track_segments(jobs, segment_batch_size=args.tapir_segment_batch_size)
+        for si, job, result in zip(indices, jobs, results):
+            if not isinstance(result, Exception):
+                result[0][:, 0] = job["query_xy"]
+                result[1][:, 0] = True
+            carry[si] = result
+    return backward, third, carry
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--src-repo-id", default=DEFAULT_SRC)
@@ -533,6 +629,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--heatmap-sigma", type=float, default=40.0)
     p.add_argument("--heatmap-alpha", type=float, default=0.55)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--tapir-segment-batch-size", type=int, default=0,
+                   help="Independent tracking clips per GPU batch; 0 batches all prepared clips in each episode")
     p.add_argument("--tapir-frame-batch-size", type=int, default=16,
                    help="Ordered frames per causal TAPIR call; 1 restores per-frame tracking")
     p.add_argument("--tapir-tf32", action="store_true", help="Allow faster TF32 FP32 operations on Ampere GPUs; may slightly change tracks")
@@ -551,6 +649,8 @@ def main() -> None:
         raise SystemExit("Query frame and sample point counts must be positive")
     if args.cluster_tail_frames < 1:
         raise SystemExit("--cluster-tail-frames must be positive")
+    if args.tapir_segment_batch_size < 0:
+        raise SystemExit("--tapir-segment-batch-size must be nonnegative")
     if args.tapir_frame_batch_size < 1:
         raise SystemExit("--tapir-frame-batch-size must be positive")
     if args.decode_batch_size < 1:
@@ -788,6 +888,11 @@ def main() -> None:
         entities = [GRIPPER_QUERY, *nouns]
         print(f"task={task!r} entities={entities}", flush=True)
 
+        batched_back, batched_third, batched_carry = _batch_episode_tracking(
+            tapir, molmo, data, stages, tail_cache[epi], selected_ids,
+            epi, ep_idx, entities, args, fps,
+        )
+
         for si, st in enumerate(stages):
             stage_started = perf_counter()
             print(f"  stage {si}: {st.end-st.start+1} frames", flush=True)
@@ -808,9 +913,10 @@ def main() -> None:
                 raw_back_vis = back_vis.copy()
                 if len(full_clip) and bool(data["masks"][CAMERA_WRIST][st.end]):
                     try:
-                        back_tracks, back_vis = tapir.track_segment_backward(
-                            full_clip, end_points, label=f"ep{ep_idx}/stage{si}/pov-back"
-                        )
+                        tracked = batched_back[si]
+                        if isinstance(tracked, Exception):
+                            raise tracked
+                        back_tracks, back_vis = tracked
                         back_vis[:, ~data["masks"][CAMERA_WRIST][st.start : st.end + 1]] = False
                         raw_back_vis = back_vis.copy()
                         back_tracks, back_vis = _bridge_visibility_gaps(
@@ -847,9 +953,10 @@ def main() -> None:
                 if len(seeds) and data["masks"][CAMERA_WRIST][seed_frame]:
                     try:
                         print(f"  POV stage {si}: continuing {len(seeds)} previous-stage points", flush=True)
-                        carry_tracks, carry_vis, _, _ = tapir.track_video(
-                            wrist_frames[seed_frame:st.end + 1], seeds, query_frame_index=0,
-                        )
+                        tracked = batched_carry[si]
+                        if isinstance(tracked, Exception):
+                            raise tracked
+                        carry_tracks, carry_vis = tracked
                         offset = st.start - seed_frame
                         carry_tracks = carry_tracks[:, offset:]
                         carry_vis = carry_vis[:, offset:]
@@ -878,13 +985,7 @@ def main() -> None:
             for cam in CAMERAS_3P:
                 if _cam_key(cam) not in src_meta.features:
                     continue
-                result = _ground_and_track_camera(
-                    tapir, molmo, data["frames"][cam], data["masks"][cam], st,
-                    entities, args.object_proximity_threshold, args.ambiguity_margin,
-                    f"ep{ep_idx}/stage{si}/{cam}", fps=fps, tracking_fps=args.third_person_tracking_fps,
-                    episode_gripper_cache=episode_gripper_caches[cam],
-                    visibility_gap_seconds=args.third_person_visibility_gap_seconds,
-                )
+                result = batched_third[si][cam]
                 if noun_failure:
                     result["failures"] = sorted(set(result.get("failures", []) + [noun_failure]))
                     if not result.get("tracks"):

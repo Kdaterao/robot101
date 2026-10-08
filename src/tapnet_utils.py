@@ -496,6 +496,103 @@ class BootsTAPIR:
             return np.zeros((N, 0, 2), np.float32), np.zeros((N, 0), bool)
         return np.concatenate(tracks, axis=1), np.concatenate(visibility, axis=1)
 
+    def track_segments(self, jobs, segment_batch_size=0):
+        """Batch independent clips along B; each clip retains its own state.
+
+        Jobs contain frames, query_xy, and label. Returns (tracks, visibility)
+        or an exception per job. Padding is terminal only and is discarded.
+        Zero segment_batch_size groups all jobs. OOM splits the group safely.
+        """
+        jobs = list(jobs)
+        if not jobs:
+            return []
+        if segment_batch_size < 0:
+            raise ValueError("segment_batch_size must be nonnegative")
+
+        def run(group, frame_batch_size):
+            features, counts, lengths, scales = [], [], [], []
+            max_queries = max(len(job["query_xy"]) for job in group)
+            if max_queries == 0 or any(not len(job["frames"]) or not len(job["query_xy"]) for job in group):
+                raise ValueError("Segment jobs require nonempty clips and queries")
+            for job in group:
+                points = np.asarray(job["query_xy"], np.float32).reshape(-1, 2)
+                counts.append(len(points))
+                lengths.append(len(job["frames"]))
+                points = np.concatenate([points, np.repeat(points[-1:], max_queries - len(points), axis=0)])
+                query = np.column_stack([np.zeros(max_queries), points[:, 1], points[:, 0]])
+                features.append(self.init_features(job["frames"][0], query))
+                _, sx, sy = self._resize(job["frames"][0])
+                scales.append((sx, sy))
+            resolutions = features[0].resolutions
+            if any(item.resolutions != resolutions for item in features):
+                raise ValueError("Segment feature resolutions differ")
+            queries = QueryFeatures(
+                lowres=tuple(torch.cat([item.lowres[i] for item in features], dim=0) for i in range(len(features[0].lowres))),
+                hires=tuple(torch.cat([item.hires[i] for item in features], dim=0) for i in range(len(features[0].hires))),
+                resolutions=resolutions,
+            )
+            state = self.initial_causal_state(max_queries, queries)
+            state = tree.map_structure(lambda tensor: tensor.repeat(len(group), *([1] * (tensor.ndim - 1))), state)
+            outputs = [(np.zeros((n, t, 2), np.float32), np.zeros((n, t), bool)) for n, t in zip(counts, lengths)]
+            max_length = max(lengths)
+            for start in range(0, max_length, frame_batch_size):
+                stop = min(max_length, start + frame_batch_size)
+                videos = []
+                for job, scale in zip(group, scales):
+                    resized = [self._resize(job["frames"][min(t, len(job["frames"]) - 1)]) for t in range(start, stop)]
+                    if any((sx, sy) != scale for _, sx, sy in resized):
+                        raise ValueError("Frame dimensions changed within a segment")
+                    videos.append(np.stack([frame for frame, _, _ in resized]))
+                video = self.preprocess(torch.as_tensor(np.stack(videos), device=self.device))
+                grids = self.model.get_feature_grids(video, is_training=False)
+                # Model refinement reshapes context dictionaries internally.
+                # Each batch item has independent tensors along dimension B.
+                result = self.model.estimate_trajectories(
+                    video.shape[-3:-1], is_training=False, feature_grids=grids,
+                    query_features=queries, query_points_in_video=None, query_chunk_size=64,
+                    causal_context=state, get_causal_context=True,
+                )
+                state = result["causal_context"]
+                tracks = result["tracks"][-1].detach().cpu().numpy().astype(np.float32)
+                visible = ((1 - F.sigmoid(result["occlusion"][-1])) *
+                           (1 - F.sigmoid(result["expected_dist"][-1])) > 0.2).detach().cpu().numpy()
+                for i, (n, length, (sx, sy)) in enumerate(zip(counts, lengths, scales)):
+                    valid = max(0, min(stop, length) - start)
+                    if valid:
+                        tracks[i, :n, :valid, 0] /= sx
+                        tracks[i, :n, :valid, 1] /= sy
+                        outputs[i][0][:, start:start + valid] = tracks[i, :n, :valid]
+                        outputs[i][1][:, start:start + valid] = visible[i, :n, :valid]
+                print(f"  TAPIR segment batch [{self.device}] {len(group)} clips, frame {stop}/{max_length}", flush=True)
+                del video, grids, result, tracks, visible
+            return outputs
+
+        def safe_run(group, frame_batch_size):
+            try:
+                return run(group, frame_batch_size)
+            except Exception as exc:
+                # Restart smaller groups with fresh state. A failed job cannot
+                # poison successful clips or cause an entire episode to drop.
+                message = str(exc)
+                out_of_memory = isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in message.lower()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            if out_of_memory and frame_batch_size > 1:
+                smaller = max(1, frame_batch_size // 2)
+                print(f"  TAPIR retrying segment batch with {smaller} frames after OOM", flush=True)
+                return safe_run(group, smaller)
+            if len(group) > 1:
+                middle = len(group) // 2
+                print(f"  TAPIR splitting {len(group)} segment jobs after: {message}", flush=True)
+                return safe_run(group[:middle], frame_batch_size) + safe_run(group[middle:], frame_batch_size)
+            return [RuntimeError(message)]
+
+        size = segment_batch_size or len(jobs)
+        results = []
+        for start in range(0, len(jobs), size):
+            results.extend(safe_run(jobs[start:start + size], self.frame_batch_size))
+        return results
+
     def track_segment_backward(
         self,
         frames_rgb: list[np.ndarray] | np.ndarray,
