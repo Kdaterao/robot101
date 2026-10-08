@@ -18,3 +18,5 @@ packaging>=24.2,<26
 molmo_utils
 decord2
 -r requirements-tapnet-gpu.txt
+
+psutil>=5.9

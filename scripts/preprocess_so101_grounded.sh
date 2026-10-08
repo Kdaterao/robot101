@@ -17,9 +17,21 @@ if [[ ! -s "$CHECKPOINT" ]]; then
   mv "$CHECKPOINT.part" "$CHECKPOINT"
 fi
 echo 'Starting episode preprocessing: wrist clusters + Molmo2 connector inference.'
-echo 'Default: episodes 0-2; resulting LeRobot dataset will upload to Hugging Face.'
-exec "$PYTHON" src/hf_preprocess_smolvla_grounded.py \
-  --episodes "${SO101_EPISODES:-0-2}" \
+echo 'Default: episode 0; resulting LeRobot dataset will upload to Hugging Face.'
+PROFILE=()
+if [[ "${SO101_TELEMETRY:-1}" == 1 ]]; then
+  if ! "$PYTHON" -c 'import psutil' >/dev/null 2>&1; then
+    echo 'Telemetry needs psutil. Run: source .venv-grounded/bin/activate && python -m pip install psutil' >&2
+    exit 2
+  fi
+  PROFILE=("$PYTHON" "$ROOT/scripts/profile_preprocessing.py")
+  if [[ -n "${SO101_PROFILE_DIR:-}" ]]; then
+    PROFILE+=(--out-dir "$SO101_PROFILE_DIR")
+  fi
+  PROFILE+=(--)
+fi
+exec "${PROFILE[@]}" "$PYTHON" src/hf_preprocess_smolvla_grounded.py \
+  --episodes "${SO101_EPISODES:-0}" \
   --dst-repo-id "${SO101_DST_REPO:-kdaterao/community_v3_ee_smolvla_molmo_grounded}" \
   --molmo-model allenai/Molmo2-4B --molmo-backend molmo2 \
   --molmo-connector-repo kdaterao/so101-molmo2-4b-gripper \

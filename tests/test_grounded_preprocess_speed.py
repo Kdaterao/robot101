@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace, ModuleType
 from unittest import TestCase, main
 from unittest.mock import patch
+from tempfile import TemporaryDirectory
+import json
 
 import numpy as np
 import torch
@@ -104,6 +106,83 @@ class TrackingTests(TestCase):
         self.assertEqual(result['entity'], 'cup')
         self.assertEqual(result['initial_points'], [[12., 10.]])
         self.assertEqual(np.asarray(result['tracks']).shape, (1, 3, 2))
+
+
+class SkipFlowTests(TestCase):
+    def test_bad_metadata_and_camera_shapes_do_not_block_valid_episode(self):
+        import hf_preprocess_smolvla_grounded as pipeline
+        from grounded_validation import EpisodeShapeError
+        features = {
+            'observation.state': {'dtype': 'float32', 'shape': [8]},
+            'action': {'dtype': 'float32', 'shape': [8]},
+            'observation.images.wrist': {'dtype': 'video', 'shape': [3, 10, 10]},
+            'observation.images.top': {'dtype': 'video', 'shape': [3, 10, 10]},
+            'source_dataset_index': {'dtype': 'int64', 'shape': [1]},
+        }
+        class Meta:
+            fps = 30
+            total_episodes = 3
+            robot_type = 'so101'
+            def __init__(self, *args, **kwargs):
+                self.features = features
+        class Source:
+            writer = None
+            def __init__(self, repo, episodes, **kwargs):
+                self.episode = episodes[0]
+            @classmethod
+            def create(cls, **kwargs):
+                cls.writer = Writer(kwargs['features'])
+                return cls.writer
+        class Writer:
+            def __init__(self, schema):
+                self.meta = SimpleNamespace(features=schema, total_episodes=0)
+                self.written = []
+                self.frames = []
+            def add_frame(self, frame):
+                self.frames.append(frame)
+            def save_episode(self):
+                self.written.append(self.frames)
+                self.frames = []
+                self.meta.total_episodes += 1
+            def finalize(self):
+                pass
+        def load(source, cameras):
+            if source.episode == 0:
+                raise EpisodeShapeError('wrong state shape')
+            return dict(n=4, gripper=np.zeros(4), action_gripper=np.zeros(4),
+                        states=np.zeros((4, 8), np.float32), actions=np.zeros((4, 8), np.float32),
+                        tasks=['pick cup']*4, masks={c: np.ones(4, bool) for c in cameras},
+                        frames={}, extras=[{'source_dataset_index': np.array([source.episode], np.int64)}]*4)
+        def decode(source, data, cameras, **kwargs):
+            for camera in cameras:
+                shape = (9, 10, 3) if source.episode == 2 and camera == 'top' else (10, 10, 3)
+                data['frames'][camera] = [np.zeros(shape, np.uint8) for _ in range(4)]
+            return data
+        def tail(*args, **kwargs):
+            return dict(tracks=np.zeros((1, 4, 2)), visible=np.ones((1, 4), bool))
+        with TemporaryDirectory() as temporary, patch.multiple(pipeline,
+                _load_lerobot=lambda: (Source, Meta, {}, Path(temporary)),
+                load_episode_metadata=load, decode_episode_cameras=decode,
+                install_statistics_validation=lambda *args: None,
+                BootsTAPIR=lambda **kwargs: SimpleNamespace(device='cpu'),
+                Molmo2Worker=lambda *args, **kwargs: object(),
+                events_from_gripper_thresholds=lambda *args, **kwargs: [],
+                stages_from_events=lambda *args: [Stage(0, 3, 'grasp')],
+                _stage_cache_entry=tail,
+                _select_pov_points=lambda *args: ({}, 1),
+                _extract_noun_phrases=lambda *args: ['cup'],
+                _ground_and_track_camera=lambda *args: dict(status='ok', tracks=[], visibility=[])), \
+                patch.dict(sys.modules, {'spacy': SimpleNamespace(load=lambda *args: object())}), \
+                patch.object(sys, 'argv', ['preprocess', '--episodes', '0-2', '--dst-repo-id', 'test/output']):
+            pipeline.main()
+            self.assertEqual(len(Source.writer.written), 1)
+            self.assertEqual(len(Source.writer.written[0]), 4)
+            self.assertEqual(Source.writer.written[0][0]['source_dataset_index'][0], 1)
+            records = [json.loads(line) for line in
+                       (Path(temporary)/'test/output/point_tracks/skipped_episodes.jsonl').read_text().splitlines()]
+            self.assertEqual([r['episode'] for r in records], [0, 2])
+            self.assertEqual(records[0]['phase'], 'tail_pass')
+            self.assertEqual(records[1]['phase'], 'full_episode')
 
 
 if __name__ == '__main__':

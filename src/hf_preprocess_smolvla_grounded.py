@@ -37,6 +37,8 @@ from hf_preprocess_smolvla import (
 from molmo_point_worker import MolmoPointWorker
 from molmo2_worker import Molmo2Worker
 from grounded_episode_io import load_episode_metadata, decode_episode_cameras
+from grounded_validation import (EpisodeShapeError, validate_episode_shapes,
+                                 record_skipped_episode, install_statistics_validation)
 from robotap import (
     Stage,
     events_from_gripper_thresholds,
@@ -384,7 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--src-repo-id", default=DEFAULT_SRC)
     p.add_argument("--dst-repo-id", default=DEFAULT_DST)
-    p.add_argument("--episodes", default=None, help="e.g. 0-9 or 0,1,5")
+    p.add_argument("--episodes", default="0", help="Episode selection (default: 0), e.g. 0-9 or 0,1,5")
     p.add_argument("--molmo-model", default=DEFAULT_MOLMO, help="Base HF model ID or local Transformers checkpoint")
     p.add_argument("--molmo-backend", choices=["molmo2", "molmopoint"], default="molmo2")
     p.add_argument("--molmo-connector", type=Path, help="Local trusted so101_connector.pt; overrides Hub download")
@@ -447,6 +449,7 @@ def main() -> None:
     progress_path = HF_LEROBOT_HOME / args.dst_repo_id / "_preprocess_done.json"
     done = _load_progress(progress_path) if args.resume else set()
     dst_root = HF_LEROBOT_HOME / args.dst_repo_id
+    skip_path = dst_root / "point_tracks" / "skipped_episodes.jsonl"
     dst = None
     if not args.dry_run:
         features = _clone_features(dict(src_meta.features), DEFAULT_FEATURES)
@@ -463,11 +466,17 @@ def main() -> None:
                 features=features,
                 use_videos=True,
             )
+        install_statistics_validation(dst.meta.features)
 
     if args.dry_run:
         for ep_idx in episode_ids:
             source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
-            data = load_episode_metadata(source, cameras)
+            try:
+                data = load_episode_metadata(source, cameras)
+                validate_episode_shapes(data, src_meta.features, cameras)
+            except EpisodeShapeError as exc:
+                print(f"[skip ep {ep_idx}] metadata shape: {exc}", flush=True)
+                continue
             grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
             events = events_from_gripper_thresholds(
                 grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
@@ -503,65 +512,81 @@ def main() -> None:
     # Pass 1: track shared POV queries only through each stage's short tail.
     stage_lists: list[list[Stage]] = []
     tail_cache: list[list[dict]] = []
+    eligible_episode_ids = []
     query_uv = None
     shared_resolution = None
     for epi, ep_idx in enumerate(episode_ids):
         print(f"[tail pass] episode {ep_idx} ({epi + 1}/{len(episode_ids)})", flush=True)
         source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
-        data = load_episode_metadata(source, cameras)
-        grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
-        events = events_from_gripper_thresholds(
-            grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
-            min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
-            vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
-        )
-        stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
-        if len(stages) > args.max_stages:
-            stages = stages[: args.max_stages]
-            stages[-1] = Stage(stages[-1].start, data["n"] - 1, "none")
-        stage_lists.append(stages)
-        tail_indices = {0}
-        for stage in stages:
-            tail_indices.update(range(max(stage.start, stage.end - args.cluster_tail_frames + 1), stage.end + 1))
-        decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
-                               batch_size=args.decode_batch_size, backend=args.video_backend)
-        wrist = data["frames"][CAMERA_WRIST]
-        h, w = wrist[0].shape[:2]
-        if shared_resolution is None:
-            shared_resolution = (w, h)
-            query = sample_query_points(w, h, args.num_sample_points, rng=np.random.default_rng(args.seed))
-            query_uv = query / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
-        elif (w, h) != shared_resolution:
-            raise SystemExit(
-                f"Wrist camera resolution changed between episodes: {shared_resolution} vs {(w, h)}. "
-                "Cross-demo funneling requires consistent camera resolution."
+        data = None
+        try:
+            data = load_episode_metadata(source, cameras)
+            grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
+            events = events_from_gripper_thresholds(
+                grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
+                min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
+                vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
             )
-        query_xy = query_uv * np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
-        episode_cache = []
-        for si, st in enumerate(stages):
-            entry = _stage_cache_entry(
-                tapir, wrist, data["masks"][CAMERA_WRIST], st, query_xy,
-                args.cluster_tail_frames, f"ep{ep_idx}/stage{si}/tail",
-            )
-            entry["height"], entry["width"] = wrist[0].shape[:2]
-            episode_cache.append(entry)
-        tail_cache.append(episode_cache)
+            stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
+            if len(stages) > args.max_stages:
+                stages = stages[: args.max_stages]
+                stages[-1] = Stage(stages[-1].start, data["n"] - 1, "none")
+            tail_indices = {0}
+            for stage in stages:
+                tail_indices.update(range(max(stage.start, stage.end - args.cluster_tail_frames + 1), stage.end + 1))
+            decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
+                                   batch_size=args.decode_batch_size, backend=args.video_backend)
+            validate_episode_shapes(data, src_meta.features, [CAMERA_WRIST])
+            wrist = data["frames"][CAMERA_WRIST]
+            h, w = wrist[0].shape[:2]
+            if shared_resolution is None:
+                shared_resolution = (w, h)
+                query = sample_query_points(w, h, args.num_sample_points, rng=np.random.default_rng(args.seed))
+                query_uv = query / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
+            elif (w, h) != shared_resolution:
+                raise EpisodeShapeError(
+                    f"Wrist camera resolution changed between episodes: {shared_resolution} vs {(w, h)}. "
+                    "Cross-demo funneling requires consistent camera resolution."
+                )
+            query_xy = query_uv * np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
+            episode_cache = []
+            for si, st in enumerate(stages):
+                entry = _stage_cache_entry(
+                    tapir, wrist, data["masks"][CAMERA_WRIST], st, query_xy,
+                    args.cluster_tail_frames, f"ep{ep_idx}/stage{si}/tail",
+                )
+                entry["height"], entry["width"] = wrist[0].shape[:2]
+                episode_cache.append(entry)
+            stage_lists.append(stages)
+            tail_cache.append(episode_cache)
+            eligible_episode_ids.append(ep_idx)
+        except EpisodeShapeError as exc:
+            record_skipped_episode(skip_path, ep_idx, "tail_pass", exc)
         del data, source
 
+    if not eligible_episode_ids:
+        print(f"No compatible episodes; see {skip_path}", flush=True)
     selected_ids, n_aligned = _select_pov_points(tail_cache, stage_lists, args, tapir.device)
     print(f"POV cross-demo alignment: {n_aligned} shared stage indices")
 
     # Pass 2: full-stage POV backtracking and third-person semantic tracks.
-    for epi, ep_idx in enumerate(episode_ids):
+    for epi, ep_idx in enumerate(eligible_episode_ids):
         if ep_idx in done:
             print(f"[ep {ep_idx}] already written, skip", flush=True)
             continue
         print(f"\n=== Grounded preprocessing episode {ep_idx} ===", flush=True)
         source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
         episode_started = perf_counter()
-        data = load_episode_metadata(source, cameras)
-        decode_episode_cameras(source, data, cameras, batch_size=args.decode_batch_size,
-                               backend=args.video_backend)
+        data = None
+        try:
+            data = load_episode_metadata(source, cameras)
+            decode_episode_cameras(source, data, cameras, batch_size=args.decode_batch_size,
+                                   backend=args.video_backend)
+            validate_episode_shapes(data, dst.meta.features, cameras)
+        except EpisodeShapeError as exc:
+            record_skipped_episode(skip_path, ep_idx, "full_episode", exc)
+            del data, source
+            continue
         stages = stage_lists[epi]
         n = data["n"]
         wrist_tracks = np.zeros((n, args.num_poi_points, 2), dtype=np.float32)
@@ -732,7 +757,9 @@ def main() -> None:
 
     if dst is not None:
         dst.finalize()
-        if args.push_to_hub:
+        if int(dst.meta.total_episodes) == 0:
+            print(f"No episodes written; no dataset upload. Skip report: {skip_path}", flush=True)
+        if args.push_to_hub and int(dst.meta.total_episodes) > 0:
             dst.push_to_hub(branch="main", tags=["robotics", "smolvla", "tapnet", args.molmo_backend], license="apache-2.0", push_videos=True)
             sidecar_root = args.sidecar_dir or (dst_root / "point_tracks")
             if sidecar_root.is_dir():

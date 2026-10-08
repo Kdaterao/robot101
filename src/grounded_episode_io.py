@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from time import perf_counter
 import numpy as np
+from grounded_validation import EpisodeShapeError
 
 from hf_preprocess_smolvla import (
     GRIPPER_INDEX, _as_numpy, _cam_key, _mask_is_real,
@@ -35,7 +36,10 @@ def _source_value(value, feature):
         return value
     if dtype in {'image', 'video'}:
         raise ValueError('Additional camera streams must be included in the preprocessing camera list')
-    return _as_numpy(value).astype(np.dtype(dtype)).reshape(tuple(feature['shape'])).copy()
+    array = _as_numpy(value)
+    if array.size != int(np.prod(feature['shape'])):
+        raise EpisodeShapeError(f'Expected source feature shape {feature["shape"]}, got {array.shape}')
+    return array.astype(np.dtype(dtype)).reshape(tuple(feature['shape'])).copy()
 
 
 def load_episode_metadata(ds, cameras):
@@ -67,7 +71,10 @@ def load_episode_metadata(ds, cameras):
             masks[cam].append(_cam_key(cam) in ds.meta.features and _mask_is_real(row, cam))
     if len(set(episodes)) != 1:
         raise ValueError('Expected a dataset filtered to one episode')
-    states, actions = np.stack(states), np.stack(actions)
+    try:
+        states, actions = np.stack(states), np.stack(actions)
+    except ValueError as exc:
+        raise EpisodeShapeError(f'Inconsistent state/action shapes within episode: {exc}') from exc
     result = dict(n=n, states=states, actions=actions, tasks=tasks,
                   gripper=states[:, GRIPPER_INDEX] if states.shape[1] > GRIPPER_INDEX else np.zeros(n, np.float32),
                   action_gripper=actions[:, GRIPPER_INDEX] if actions.shape[1] > GRIPPER_INDEX else np.zeros(n, np.float32),

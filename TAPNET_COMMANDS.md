@@ -234,7 +234,7 @@ hf auth login
 bash scripts/preprocess_so101_grounded.sh
 ```
 
-The launcher processes episodes **0–2** of
+The launcher processes **episode 0 only** by default from
 `felsager/community_dataset_v3_ee_smolVLA` and uploads the resulting LeRobot
 videos/data to `kdaterao/community_v3_ee_smolvla_molmo_grounded`.
 It downloads the TAPIR checkpoint, the official `allenai/Molmo2-4B` HF base,
@@ -474,3 +474,89 @@ Source fields such as `source_dataset_index` are retained in every output frame
 with their declared dtype and shape. LeRobot generates new frame/episode indices
 for the destination. Required source fields are checked while loading metadata,
 before tracking begins, to avoid a late feature mismatch during video writing.
+
+
+## Measure CPU/GPU usage before adding workers
+
+The profiler samples one PID and its descendants, including encoder children.
+It records process CPU percentage and RSS RAM, process VRAM, process SM/memory/
+encoder/decoder activity when NVIDIA exposes those counters, and separate
+whole-GPU utilization and VRAM. Whole-GPU values include unrelated GPU jobs.
+The implementation uses `nvidia-smi pmon` for process activity; `-`/unsupported
+counters are recorded as null, not zero or a device-wide substitute.
+See [NVIDIA's process monitoring documentation](https://docs.nvidia.com/deploy/nvidia-smi/index.html#process-monitoring).
+
+Attach to the preprocessing run already in progress, from another VM terminal:
+
+```bash
+source .venv-grounded/bin/activate
+python -m pip install psutil
+pgrep -af '[h]f_preprocess_smolvla_grounded.py'
+# Replace 12345 with the Python preprocessing PID printed above.
+python scripts/profile_preprocessing.py --pid 12345 --duration 120
+```
+
+The command above observes the process for two minutes and leaves it running.
+For a complete run including startup, launch preprocessing through the profiler:
+
+```bash
+SO101_DST_REPO=kdaterao/so101_profile_test \
+  python scripts/profile_preprocessing.py -- \
+  bash scripts/preprocess_so101_grounded.sh --tapir-tf32
+```
+
+Profiles are saved under `outputs/profiles/<UTC timestamp>/`:
+
+- `summary.json`: mean/peak CPU, peak RAM, mean/peak process SM activity, peak
+  process VRAM, and whole-GPU measurements.
+- `processes.csv`: samples by PID/GPU, convenient for plotting.
+- `samples.jsonl`: detailed process and host/GPU samples.
+
+CPU 100% means one logical core; 400% means roughly four cores of work. RSS
+includes shared pages, so adding it across workers may overstate physical RAM.
+GPU memory-activity percentage measures activity rather than capacity; VRAM
+usage is reported in MiB separately. Sampling defaults to two seconds;
+`--interval 1` increases resolution, while short spikes/processes can still be
+missed. Use a fresh `--out-dir PATH` to choose the output directory.
+
+Measure one-worker throughput and peak VRAM during full-stage tracking. If
+GPU utilization is already high, adding workers to the same GPU may increase
+contention. If GPU activity is low while CPU use is high, parallel video decoding
+is a better first candidate. Test two workers and compare combined throughput
+before scaling further; worker count cannot be chosen from VRAM alone. Separate
+preprocessing jobs need distinct output destinations. Splitting episodes between
+jobs also changes the cross-demo clustering group, so retain the intended group
+when designing worker scheduling.
+
+
+## Skip incompatible episodes and collect telemetry
+
+The VM launcher now processes episode 0 by default and records resource usage
+for the Python process and its encoder children. On an existing environment,
+install the small profiler dependency once:
+
+```bash
+source .venv-grounded/bin/activate
+python -m pip install psutil
+SO101_DST_REPO=kdaterao/so101_grounded_single_test \
+  bash scripts/preprocess_so101_grounded.sh --tapir-tf32
+```
+
+Telemetry is written to `outputs/profiles/<UTC timestamp>/summary.json`,
+`processes.csv`, and `samples.jsonl`. Use `SO101_PROFILE_DIR=/path/to/new-directory`
+to choose the profile directory, or `SO101_TELEMETRY=0` to disable profiling.
+Set `SO101_EPISODES=0-9` (or pass `--episodes 0-9`) to request more episodes.
+
+State/action and camera dimension mismatches are checked before tracking/writing.
+Incompatible episodes are skipped and logged to
+`<destination-cache>/point_tracks/skipped_episodes.jsonl`. They are not marked
+successfully processed. The tests cover a malformed metadata episode, a valid
+episode, and a wrong-resolution episode in the same run. Sparse wrist-tail
+loading is retained. If all episodes are skipped, no empty dataset is uploaded.
+
+The LeRobot statistics validator is adapted within this preprocessing process
+so numeric padding masks are validated by their dtype, rather than the substring
+`image` in their field name. This fixes the second-episode aggregation failure
+`Shape of quantile 'min' ... (1,)`. The vendored LeRobot checkout is unchanged.
+After the earlier crash in `save_episode`, use a fresh output destination:
+metadata may already have been partly written before the aggregation exception.
