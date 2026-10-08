@@ -35,6 +35,7 @@ exec "${PROFILE[@]}" "$PYTHON" src/hf_preprocess_smolvla_grounded.py \
   --dst-repo-id "${SO101_DST_REPO:-kdaterao/community_v3_ee_smolvla_molmo_grounded}" \
   --molmo-model allenai/Molmo2-4B --molmo-backend molmo2 \
   --molmo-connector-repo kdaterao/so101-molmo2-4b-gripper \
+  --molmo-batch-size "${SO101_MOLMO_BATCH_SIZE:-4}" \
   --molmo-dtype bf16 --device cuda --video-backend pyav \
   --tapir-frame-batch-size "${SO101_TAPIR_FRAME_BATCH_SIZE:-16}" \
   --third-person-tracking-fps "${SO101_THIRD_PERSON_TRACKING_FPS:-1}" \

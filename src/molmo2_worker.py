@@ -53,7 +53,11 @@ def apply_connector(model, state: dict) -> int:
 class Molmo2Worker:
     def __init__(self, model_id='allenai/Molmo2-4B', device=None, dtype='bf16',
                  connector_path: Path | None = None,
-                 connector_repo='kdaterao/so101-molmo2-4b-gripper', connector_revision='main'):
+                 connector_repo='kdaterao/so101-molmo2-4b-gripper', connector_revision='main',
+                 batch_size: int = 4):
+        if batch_size < 1:
+            raise ValueError("Molmo batch_size must be positive")
+        self.batch_size = int(batch_size)
         from huggingface_hub import hf_hub_download
         from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -75,23 +79,74 @@ class Molmo2Worker:
         del state
         self.model.requires_grad_(False).eval()
         self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        self.processor.tokenizer.padding_side = 'left'
+        print(f'Molmo grounding batch size: {self.batch_size}', flush=True)
         print(f'Applied {count} fine-tuned tensors from {connector_path}; inference only', flush=True)
 
-    @torch.inference_mode()
     def ground(self, image_rgb: np.ndarray, prompt: str) -> dict:
-        image = Image.fromarray(np.asarray(image_rgb, dtype=np.uint8))
-        # Match the gripper label used by the point annotation training dataset.
-        if prompt == 'Point to the robot gripper.':
-            prompt = 'Point to the SO-101 gripper.'
-        messages = [{'role': 'user', 'content': [
-            {'type': 'image', 'image': image}, {'type': 'text', 'text': prompt}]}]
-        inputs = self.processor.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-            return_tensors='pt', return_dict=True)
+        result = self.ground_batch([(image_rgb, prompt)])[0]
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        return result
+
+    @torch.inference_mode()
+    def _generate_batch(self, requests) -> list[dict]:
+        images, texts = [], []
+        for image_rgb, prompt in requests:
+            image = Image.fromarray(np.asarray(image_rgb, dtype=np.uint8))
+            if prompt == 'Point to the robot gripper.':
+                prompt = 'Point to the SO-101 gripper.'
+            messages = [{'role': 'user', 'content': [
+                {'type': 'image', 'image': image}, {'type': 'text', 'text': prompt}]}]
+            texts.append(self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True))
+            images.append(image)
+        # The official processor accepts a list of texts and a flat image list
+        # in matching order. Left padding is required for decoder generation.
+        inputs = self.processor(
+            text=texts, images=images, padding=True, add_special_tokens=False,
+            return_tensors='pt',
+        )
         device = next(self.model.parameters()).device
         inputs = {key: value.to(device) if hasattr(value, 'to') else value
                   for key, value in inputs.items()}
         output = self.model.generate(**inputs, max_new_tokens=200, do_sample=False)
-        raw = self.processor.tokenizer.decode(
-            output[0, inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-        return {'points_xy': parse_image_points(raw, image.width, image.height), 'raw_response': raw}
+        prompt_length = inputs['input_ids'].shape[1]
+        raw_outputs = self.processor.tokenizer.batch_decode(
+            output[:, prompt_length:], skip_special_tokens=True)
+        return [
+            {'points_xy': parse_image_points(raw, image.width, image.height), 'raw_response': raw}
+            for raw, image in zip(raw_outputs, images)
+        ]
+
+    def ground_batch(self, requests) -> list[dict]:
+        """Ground independent (RGB image, prompt) requests, preserving order.
+
+        On batch failure, retry smaller groups. Unresolved singleton requests
+        carry errors so one bad input cannot discard the other annotations.
+        """
+        requests = list(requests)
+
+        def generate(group):
+            try:
+                results = self._generate_batch(group)
+                if len(results) != len(group):
+                    raise RuntimeError("Molmo returned an unexpected batch length")
+                return results
+            except Exception as exc:
+                message = str(exc)
+            # Leave the exception scope first so temporary generation tensors
+            # can be released before retrying a smaller batch.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if len(group) > 1:
+                middle = len(group) // 2
+                print(f"Molmo batch of {len(group)} failed; retrying smaller groups: {message}", flush=True)
+                return generate(group[:middle]) + generate(group[middle:])
+            return [{'points_xy': np.zeros((0, 2), np.float32),
+                     'raw_response': '', 'error': message}]
+
+        results = []
+        for start in range(0, len(requests), self.batch_size):
+            results.extend(generate(requests[start:start + self.batch_size]))
+        return results

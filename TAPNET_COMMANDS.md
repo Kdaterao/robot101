@@ -761,3 +761,29 @@ the worker count if rate-limit waits increase. Restart the process to apply it.
 ```bash
 SO101_HF_DOWNLOAD_WORKERS=4 bash scripts/preprocess_so101_grounded.sh
 ```
+
+### Batched Molmo2 grounding
+
+The grounded entrypoint defaults to `--molmo-batch-size 4`. Independent gripper
+and noun prompts on each stage/camera start image share a generation batch.
+Prompts, image order, and output-to-entity mapping are retained, including the
+SO-101 gripper prompt used by the fine-tuned connector. The official processor
+pads text on the left; continuation decoding excludes the full padded prompt.
+The model and connector remain unchanged. MolmoPoint keeps its sequential path.
+
+Endpoint fallback still queries the exact subtask-end frame separately. Failed
+batches retry smaller groups, recording unresolved singleton errors rather
+than inventing points. With three stage entities, the effective batch is three
+even if the configured limit is four; requests do not yet span stages.
+
+```bash
+SO101_MOLMO_BATCH_SIZE=4 \
+SO101_TAPIR_FRAME_BATCH_SIZE=256 \
+SO101_HF_DOWNLOAD_WORKERS=8 \
+SO101_DST_REPO=kdaterao/so101_grounded_molmo_batch_test_v1 \
+bash scripts/preprocess_so101_grounded.sh
+```
+
+Use `SO101_MOLMO_BATCH_SIZE=1` for a sequential comparison on the same episode.
+Generation batching increases VRAM usage; speed and grounding accuracy must
+be compared on the VM. TAPIR segments remain sequential after the rollback.

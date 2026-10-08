@@ -355,13 +355,25 @@ def _ground_and_track_camera(
     frame = clip[0]
     point_parts: list[np.ndarray] = []
     ranges: dict[str, tuple[int, int]] = {}
-    for entity in entities:
+    batched_results = None
+    if hasattr(molmo, "ground_batch"):
+        started = perf_counter()
+        print(f"  Molmo {label}: grounding {len(entities)} independent requests", flush=True)
+        batched_results = molmo.ground_batch([(frame, f"Point to the {entity}.") for entity in entities])
+        if len(batched_results) != len(entities):
+            raise ValueError("Molmo grounding batch length mismatch")
+        print(f"    batched grounding finished in {perf_counter()-started:.1f}s", flush=True)
+    for entity_index, entity in enumerate(entities):
         prompt = f"Point to the {entity}."
         started = perf_counter()
-        print(f"  Molmo {label}: {entity}", flush=True)
+        if batched_results is None:
+            print(f"  Molmo {label}: {entity}", flush=True)
         try:
-            result = molmo.ground(frame, prompt)
-            print(f"    grounding finished in {perf_counter()-started:.1f}s", flush=True)
+            result = batched_results[entity_index] if batched_results is not None else molmo.ground(frame, prompt)
+            if result.get("error"):
+                raise RuntimeError(result["error"])
+            if batched_results is None:
+                print(f"    grounding finished in {perf_counter()-started:.1f}s", flush=True)
             raw_points = np.asarray(result.get("points_xy", []), dtype=np.float32).reshape(-1, 2)
             points = _valid_points(result, w, h)
             if len(points) < len(raw_points):
@@ -491,6 +503,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--molmo-connector", type=Path, help="Local trusted so101_connector.pt; overrides Hub download")
     p.add_argument("--molmo-connector-repo", default="kdaterao/so101-molmo2-4b-gripper")
     p.add_argument("--molmo-connector-revision", default="main")
+    p.add_argument("--molmo-batch-size", type=int, default=4,
+                   help="Independent Molmo2 image/prompt requests per generation batch")
     p.add_argument("--molmo-dtype", default="bf16", choices=["auto", "bf16", "fp16", "fp32"])
     p.add_argument("--device", default=None)
     p.add_argument("--spacy-model", default="en_core_web_sm")
@@ -547,6 +561,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if any(not np.isfinite(v) or v < 0 for v in (args.pov_visibility_gap_seconds, args.third_person_visibility_gap_seconds)):
         raise SystemExit("Visibility gap seconds must be finite and nonnegative")
+    if args.molmo_batch_size < 1:
+        raise SystemExit("--molmo-batch-size must be positive")
     if args.query_frames_per_stage < 1 or args.num_sample_points < 1:
         raise SystemExit("Query frame and sample point counts must be positive")
     if args.cluster_tail_frames < 1:
@@ -640,7 +656,7 @@ def main() -> None:
         molmo = Molmo2Worker(
             args.molmo_model, device=args.device, dtype=args.molmo_dtype,
             connector_path=args.molmo_connector, connector_repo=args.molmo_connector_repo,
-            connector_revision=args.molmo_connector_revision,
+            connector_revision=args.molmo_connector_revision, batch_size=args.molmo_batch_size,
         )
     else:
         molmo = MolmoPointWorker(args.molmo_model, device=args.device, dtype=args.molmo_dtype)
