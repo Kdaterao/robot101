@@ -23,7 +23,8 @@ except ModuleNotFoundError as exc:
     sys.modules['tapnet.torch'] = tapnet.tapir_torch
 
 from grounded_episode_io import load_episode_metadata, decode_episode_cameras
-from hf_preprocess_smolvla_grounded import _ground_and_track_camera, GRIPPER_QUERY
+from hf_preprocess_smolvla_grounded import (
+    _ground_and_track_camera, _stage_cache_entry, _tail_query_frames, GRIPPER_QUERY)
 from robotap import Stage
 
 
@@ -87,6 +88,39 @@ class DecodeTests(TestCase):
 
 
 class TrackingTests(TestCase):
+    def test_shared_features_only_track_tail_and_mask_invalid_frames(self):
+        bank = object()
+        calls = []
+        class Tapir:
+            def track_with_features(self, clip, features, **kwargs):
+                self.assert_bank = features
+                calls.append([int(f[0, 0, 0]) for f in clip])
+                return np.zeros((2, len(clip), 2)), np.ones((2, len(clip)), bool)
+            def track_video(self, *args, **kwargs):
+                raise AssertionError('Candidate descriptors must not be re-seeded')
+        tracker = Tapir()
+        frames = [np.full((2, 2, 3), i, np.uint8) for i in range(10)]
+        masks = np.ones(10, bool)
+        masks[8] = False
+        result = _stage_cache_entry(tracker, frames, masks, Stage(0, 9, 'grasp'), bank, 2, 3, 'test')
+        self.assertIs(tracker.assert_bank, bank)
+        self.assertEqual(calls, [[7, 8, 9]])
+        self.assertEqual(result['tail_start'], 7)
+        self.assertFalse(result['visible'][:, 1].any())
+        short = _stage_cache_entry(tracker, frames, masks, Stage(0, 1, 'grasp'), bank, 2, 30, 'short')
+        self.assertEqual(calls[-1], [0, 1])
+        self.assertEqual(short['tail_start'], 0)
+        empty = _stage_cache_entry(tracker, frames, np.zeros(10, bool), Stage(0, 9, 'grasp'), bank, 2, 3, 'empty')
+        self.assertEqual(empty['tracks'].shape, (2, 3, 2))
+        self.assertFalse(empty['visible'].any())
+
+    def test_seed_frames_cover_each_tail_and_skip_missing_frames(self):
+        stages = [Stage(0, 9, 'grasp'), Stage(10, 11, 'release')]
+        masks = np.ones(12, bool)
+        self.assertEqual(_tail_query_frames(stages, 4, 5, 1, masks), [6, 7, 8, 9, 10, 11])
+        masks[7] = False
+        self.assertEqual(_tail_query_frames(stages, 4, 5, 1, masks), [6, 8, 9, 10, 11])
+
     def test_semantic_selection_reuses_four_value_tapir_result(self):
         class Molmo:
             def ground(self, frame, prompt):
@@ -158,23 +192,37 @@ class SkipFlowTests(TestCase):
                 shape = (9, 10, 3) if source.episode == 2 and camera == 'top' else (10, 10, 3)
                 data['frames'][camera] = [np.zeros(shape, np.uint8) for _ in range(4)]
             return data
+        bank = object()
+        tail_banks = []
+        backward_lengths = []
+        def backward(clip, endpoints, **kwargs):
+            backward_lengths.append(len(clip))
+            return np.zeros((len(endpoints), len(clip), 2)), np.ones((len(endpoints), len(clip)), bool)
         def tail(*args, **kwargs):
+            tail_banks.append(args[4])
             return dict(tracks=np.zeros((1, 4, 2)), visible=np.ones((1, 4), bool))
         with TemporaryDirectory() as temporary, patch.multiple(pipeline,
                 _load_lerobot=lambda: (Source, Meta, {}, Path(temporary)),
                 load_episode_metadata=load, decode_episode_cameras=decode,
                 install_statistics_validation=lambda *args: None,
-                BootsTAPIR=lambda **kwargs: SimpleNamespace(device='cpu'),
+                BootsTAPIR=lambda **kwargs: SimpleNamespace(device='cpu', init_features=lambda *args: object(),
+                                                           track_segment_backward=backward),
+                concat_query_features=lambda parts: bank,
                 Molmo2Worker=lambda *args, **kwargs: object(),
                 events_from_gripper_thresholds=lambda *args, **kwargs: [],
                 stages_from_events=lambda *args: [Stage(0, 3, 'grasp')],
                 _stage_cache_entry=tail,
-                _select_pov_points=lambda *args: ({}, 1),
+                _select_pov_points=lambda *args: ({(0, 0): np.array([0]), (1, 0): np.array([0])}, 1),
                 _extract_noun_phrases=lambda *args: ['cup'],
                 _ground_and_track_camera=lambda *args: dict(status='ok', tracks=[], visibility=[])), \
                 patch.dict(sys.modules, {'spacy': SimpleNamespace(load=lambda *args: object())}), \
                 patch.object(sys, 'argv', ['preprocess', '--episodes', '0-2', '--dst-repo-id', 'test/output']):
             pipeline.main()
+            self.assertEqual(len(tail_banks), 2)
+            self.assertTrue(all(features is bank for features in tail_banks))
+            self.assertEqual(backward_lengths, [4])
+            provenance = json.loads((Path(temporary)/'test/output/point_tracks/pov_query_bank.json').read_text())
+            self.assertEqual({row[0] for row in provenance['source_episode_frame']}, {1, 2})
             self.assertEqual(len(Source.writer.written), 1)
             self.assertEqual(len(Source.writer.written[0]), 4)
             self.assertEqual(Source.writer.written[0][0]['source_dataset_index'][0], 1)

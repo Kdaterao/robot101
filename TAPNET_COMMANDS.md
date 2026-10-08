@@ -219,11 +219,23 @@ entity to the gripper is selected when normalized distance is at most `0.08`.
 Otherwise it uses the gripper points as a fallback. The selected start-frame
 points reuse their candidate trajectories for the final third-person goal tracks.
 
-POV processing samples one shared set of candidate points, tracks them only
-through each stage's final 30 frames, selects points across the shared stage
-prefix with RoboTAP funneling/clustering, then tracks selected endpoint points
-backward through each full stage. Extra stages are selected per episode when
-episode stage counts differ.
+POV processing follows `src/old_tapnet/tapnetCreate.py`: it extracts one shared
+bank of TAPIR appearance features from multiple frames across the demos, then
+tracks those exact descriptors in every demo. Equal candidate IDs therefore
+refer to the same source descriptors across demos. Seeds come from each stage's
+final `--cluster-tail-frames` frames (default 30), with
+`--query-frames-per-stage 5`. Candidate tracking stays within these windows.
+RoboTAP motion clustering, static-motion filtering, cluster voting, and
+cross-demo endpoint funneling select the shared stage points; selected endpoints
+are then tracked backward through each full stage. Extra stages are selected
+per episode when episode stage counts differ. `point_tracks/pov_query_bank.json`
+records the source episode, frame, and pixel coordinate of each shared query.
+
+The existing lightweight defaults remain 128 sampled points and 16 selected
+points; use `--num-sample-points 512 --num-poi-points 128` for the reference
+script's density. As in the reference, at least 8 points are sampled per source
+frame, so the total can exceed the requested point budget. Use a fresh output
+destination when switching from the previous independently seeded POV method.
 
 On a fresh Ubuntu RTX A6000 VM, install the inference/video packages and run:
 
@@ -435,9 +447,11 @@ This viewer is for the labeled-image dataset, not the clustered LeRobot videos.
 ## Faster episode preprocessing
 
 The grounded preprocessing entrypoint reads state/actions/task text directly
-from the episode table. In its clustering pass it decodes only wrist tail
+from the episode table. For the shared query bank and clustering it decodes only wrist tail
 windows (plus frame 0 for the resolution check), rather than every frame of all
-three cameras. The second pass decodes full camera streams in uint8 batches,
+three cameras. Tail windows are decoded once for feature extraction and again
+for tracking so decoded images do not accumulate across demos. The rendering
+pass decodes full camera streams in uint8 batches,
 with one seek per batch rather than per frame. Episode timestamp offsets,
 padding masks, and the existing full-stage tracking behavior are retained.
 

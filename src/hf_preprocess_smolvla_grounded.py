@@ -1,6 +1,8 @@
 """Build POV-clustered and third-person Molmo-grounded SmolVLA data.
 
-POV points are selected across demonstrations from their stage-tail tracks and
+POV uses tapnetCreate.py's shared appearance-feature bank and motion clustering.
+Query descriptors sampled from multiple stage-tail frames keep the same identity
+across demonstrations. Points are selected from their stage-tail tracks and
 then tracked backward through each full stage. Third-person points are grounded
 from task noun phrases plus the gripper, associated at the stage endpoint, and
 tracked forward from the selected stage-start points. Per-stage diagnostics are
@@ -49,6 +51,7 @@ from robotap import (
 from tapnet_utils import (
     BootsTAPIR,
     DEFAULT_CHECKPOINT,
+    concat_query_features,
     points_heatmap,
     sample_query_points,
     track_tail_endpoint,
@@ -136,12 +139,24 @@ def _draw_points(frame_rgb: np.ndarray, points: np.ndarray, label: str) -> np.nd
     return bgr
 
 
+def _tail_query_frames(stages: list[Stage], tail_frames: int, query_frames: int,
+                       goal_tail_frames: int, masks: np.ndarray) -> list[int]:
+    """Choose distinct, real seed frames inside each stage's clustering window."""
+    indices = set()
+    for stage in stages:
+        lo = max(stage.start, stage.end - tail_frames + 1)
+        hi = max(lo, stage.end - goal_tail_frames // 2)
+        indices.update(int(round(f)) for f in np.linspace(lo, hi, query_frames))
+    return sorted(i for i in indices if masks[i])
+
+
 def _stage_cache_entry(
     tapir: BootsTAPIR,
     frames: list[np.ndarray],
     masks: np.ndarray,
     stage: Stage,
-    query_xy: np.ndarray,
+    shared_features,
+    num_queries: int,
     tail_frames: int,
     label: str,
 ) -> dict:
@@ -151,8 +166,8 @@ def _stage_cache_entry(
     real = masks[tail_start : stage.end + 1]
     if len(clip) < 1 or not bool(real.any()):
         return {
-            "tracks": np.zeros((len(query_xy), max(1, len(clip)), 2), dtype=np.float32),
-            "visible": np.zeros((len(query_xy), max(1, len(clip))), dtype=bool),
+            "tracks": np.zeros((num_queries, max(1, len(clip)), 2), dtype=np.float32),
+            "visible": np.zeros((num_queries, max(1, len(clip))), dtype=bool),
             "tail_start": tail_start,
             "length": length,
         }
@@ -160,7 +175,8 @@ def _stage_cache_entry(
     clip = clip[first_real:]
     real = real[first_real:]
     tail_start += first_real
-    tracks, visible, _, _ = tapir.track_video(clip, query_xy, query_frame_index=0)
+    tracks, visible = tapir.track_with_features(
+        clip, shared_features, label=label, num_frames=len(clip))
     # Ignore padding at each camera's invalid frames.
     visible[:, ~real] = False
     return {"tracks": tracks, "visible": visible, "tail_start": tail_start, "length": length}
@@ -414,7 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gripper-vel-min", type=float, default=0.05)
     p.add_argument("--gripper-smooth-window", type=int, default=5)
     p.add_argument("--cluster-tail-frames", type=int, default=30)
-    p.add_argument("--num-sample-points", type=int, default=128)
+    p.add_argument("--num-sample-points", type=int, default=128, help="Shared query budget across episodes/stages/source frames; at least 8 per source frame")
+    p.add_argument("--query-frames-per-stage", type=int, default=5, help="Spread feature seeds across each wrist tail, as in tapnetCreate.py")
     p.add_argument("--num-poi-points", type=int, default=16)
     p.add_argument("--n-clusters", type=int, default=6)
     p.add_argument("--static-thresh", type=float, default=0.03)
@@ -433,6 +450,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.query_frames_per_stage < 1 or args.num_sample_points < 1:
+        raise SystemExit("Query frame and sample point counts must be positive")
     if args.cluster_tail_frames < 1:
         raise SystemExit("--cluster-tail-frames must be positive")
     if args.decode_batch_size < 1:
@@ -517,14 +536,18 @@ def main() -> None:
     else:
         molmo = MolmoPointWorker(args.molmo_model, device=args.device, dtype=args.molmo_dtype)
 
-    # Pass 1: track shared POV queries only through each stage's short tail.
+    # Build one shared appearance-feature bank, as in tapnetCreate.py.
+    # Candidate tracking remains restricted to stage tails.
     stage_lists: list[list[Stage]] = []
     tail_cache: list[list[dict]] = []
     eligible_episode_ids = []
-    query_uv = None
+    feature_parts = []
+    query_source_parts = []
+    query_xy_parts = []
+    query_rng = np.random.default_rng(args.seed)
     shared_resolution = None
     for epi, ep_idx in enumerate(episode_ids):
-        print(f"[tail pass] episode {ep_idx} ({epi + 1}/{len(episode_ids)})", flush=True)
+        print(f"[query bank] episode {ep_idx} ({epi + 1}/{len(episode_ids)})", flush=True)
         source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
         data = None
         try:
@@ -549,31 +572,70 @@ def main() -> None:
             h, w = wrist[0].shape[:2]
             if shared_resolution is None:
                 shared_resolution = (w, h)
-                query = sample_query_points(w, h, args.num_sample_points, rng=np.random.default_rng(args.seed))
-                query_uv = query / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
             elif (w, h) != shared_resolution:
                 raise EpisodeShapeError(
                     f"Wrist camera resolution changed between episodes: {shared_resolution} vs {(w, h)}. "
                     "Cross-demo funneling requires consistent camera resolution."
                 )
-            query_xy = query_uv * np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
-            episode_cache = []
-            for si, st in enumerate(stages):
-                entry = _stage_cache_entry(
-                    tapir, wrist, data["masks"][CAMERA_WRIST], st, query_xy,
-                    args.cluster_tail_frames, f"ep{ep_idx}/stage{si}/tail",
-                )
-                entry["height"], entry["width"] = wrist[0].shape[:2]
-                episode_cache.append(entry)
+            # Spread seed frames across every stage tail, and extract each
+            # seed's descriptors once. They retain the same identity in all demos.
+            query_frames = _tail_query_frames(stages, args.cluster_tail_frames,
+                                             args.query_frames_per_stage, args.goal_tail_frames,
+                                             data["masks"][CAMERA_WRIST])
+            n_per = max(8, args.num_sample_points // max(1, len(episode_ids) * len(stages) * args.query_frames_per_stage))
+            for index in query_frames:
+                xy = sample_query_points(w, h, n_per, rng=query_rng)
+                tyx = np.stack([np.zeros(len(xy)), xy[:, 1], xy[:, 0]], axis=1).astype(np.float32)
+                feature_parts.append(tapir.init_features(wrist[index], tyx))
+                query_source_parts.append(np.tile([ep_idx, index], (len(xy), 1)))
+                query_xy_parts.append(xy)
             stage_lists.append(stages)
-            tail_cache.append(episode_cache)
             eligible_episode_ids.append(ep_idx)
         except EpisodeShapeError as exc:
             record_skipped_episode(skip_path, ep_idx, "tail_pass", exc)
         del data, source
 
-    if not eligible_episode_ids:
-        print(f"No compatible episodes; see {skip_path}", flush=True)
+    if not eligible_episode_ids or not feature_parts:
+        print(f"No valid shared wrist queries; see {skip_path}", flush=True)
+        dst.finalize()
+        return
+    shared_features = concat_query_features(feature_parts)
+    query_sources = np.concatenate(query_source_parts).astype(np.int64)
+    query_source_xy = np.concatenate(query_xy_parts).astype(np.float32)
+    num_queries = len(query_sources)
+    del feature_parts
+    bank_root = args.sidecar_dir or (dst_root / "point_tracks")
+    bank_root.mkdir(parents=True, exist_ok=True)
+    (bank_root / "pov_query_bank.json").write_text(json.dumps({
+        "method": "tapnetCreate_shared_appearance_features",
+        "source_episode_frame": query_sources.tolist(),
+        "source_points_xy": query_source_xy.tolist(),
+        "tail_frames": args.cluster_tail_frames,
+        "query_frames_per_stage": args.query_frames_per_stage,
+    }) + "\n", encoding="utf-8")
+    print(f"Shared wrist feature bank: {num_queries} queries; same descriptors in every episode", flush=True)
+
+    # Track this exact feature bank through each stage tail in every demo.
+    for epi, ep_idx in enumerate(eligible_episode_ids):
+        source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
+        data = load_episode_metadata(source, cameras)
+        stages = stage_lists[epi]
+        tail_indices = {0}
+        for stage in stages:
+            tail_indices.update(range(max(stage.start, stage.end - args.cluster_tail_frames + 1), stage.end + 1))
+        decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
+                               batch_size=args.decode_batch_size, backend=args.video_backend)
+        episode_cache = []
+        for si, stage in enumerate(stages):
+            entry = _stage_cache_entry(
+                tapir, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST], stage,
+                shared_features, num_queries, args.cluster_tail_frames, f"ep{ep_idx}/stage{si}/tail")
+            entry["height"], entry["width"] = data["frames"][CAMERA_WRIST][0].shape[:2]
+            episode_cache.append(entry)
+        tail_cache.append(episode_cache)
+        del data, source
+    del shared_features
+
     selected_ids, n_aligned = _select_pov_points(tail_cache, stage_lists, args, tapir.device)
     print(f"POV cross-demo alignment: {n_aligned} shared stage indices")
 
@@ -674,6 +736,8 @@ def main() -> None:
                     "status": "failed" if pov_failure else "ok",
                     "reason": pov_failure,
                     "active_points_end": end_points.tolist(),
+                    "query_ids": ids.tolist(),
+                    "query_sources_episode_frame": query_sources[ids].tolist(),
                     "tracks": back_tracks.tolist(), "visibility": back_vis.tolist(),
                 },
                 "grounding_model": {
