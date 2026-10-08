@@ -37,6 +37,7 @@ from hf_preprocess_smolvla import (
 from molmo_point_worker import MolmoPointWorker
 from molmo2_worker import Molmo2Worker
 from grounded_episode_io import load_episode_metadata, decode_episode_cameras
+from grounded_destination import recover_empty_destination, check_resume_metadata
 from grounded_validation import (EpisodeShapeError, validate_episode_shapes,
                                  record_skipped_episode, install_statistics_validation)
 from robotap import (
@@ -453,7 +454,14 @@ def main() -> None:
     dst = None
     if not args.dry_run:
         features = _clone_features(dict(src_meta.features), DEFAULT_FEATURES)
+        if args.resume and dst_root.exists():
+            if recover_empty_destination(dst_root) is not None:
+                done = set()
         if args.resume and (dst_root / "meta").exists():
+            try:
+                check_resume_metadata(dst_root)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
             dst = LeRobotDataset.resume(repo_id=args.dst_repo_id, root=dst_root)
         else:
             if dst_root.exists():
