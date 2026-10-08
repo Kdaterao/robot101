@@ -27,6 +27,16 @@ class ShapeTests(unittest.TestCase):
         with self.assertRaisesRegex(EpisodeShapeError, 'wrist frame 1'):
             validate_episode_shapes(data, self.features(), ['wrist'])
 
+    def test_vm_hwc_schema_is_valid_and_wrong_resolution_still_fails(self):
+        data = self.data()
+        data['frames']['wrist'] = [np.zeros((480, 640, 3), np.uint8), None]
+        features = self.features()
+        features['observation.images.wrist']['shape'] = [480, 640, 3]
+        validate_episode_shapes(data, features, ['wrist'])
+        data['frames']['wrist'][1] = np.zeros((481, 640, 3), np.uint8)
+        with self.assertRaisesRegex(EpisodeShapeError, 'wrist frame 1'):
+            validate_episode_shapes(data, features, ['wrist'])
+
     def test_invalid_action_shape(self):
         data = self.data()
         data['actions'] = np.zeros((2, 7))

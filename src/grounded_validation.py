@@ -21,10 +21,17 @@ def validate_episode_shapes(data, features, cameras):
             continue
         shape = tuple(features[key]['shape'])
         if len(shape) != 3:
-            raise EpisodeShapeError(f'{key}: expected declared CHW image shape, got {shape}')
-        expected = (shape[1], shape[2], shape[0])
+            raise EpisodeShapeError(f'{key}: expected declared CHW or HWC image shape, got {shape}')
+        # Decoded frames are HWC; source schemas may declare either layout.
+        expected = []
+        if shape[-1] in (1, 3, 4):
+            expected.append(shape)
+        if shape[0] in (1, 3, 4):
+            expected.append((shape[1], shape[2], shape[0]))
+        if not expected:
+            raise EpisodeShapeError(f'{key}: cannot identify channel axis in declared shape {shape}')
         for index, image in enumerate(data['frames'][camera]):
-            if image is not None and tuple(image.shape) != expected:
+            if image is not None and tuple(image.shape) not in expected:
                 raise EpisodeShapeError(f'{key} frame {index}: expected HWC {expected}, got {image.shape}')
 
 
