@@ -749,3 +749,15 @@ Compare the same episode with `SO101_TAPIR_FRAME_BATCH_SIZE=1`. Smaller chunks
 use less VRAM; try 8 if 16 runs out of memory. Batching does not change source
 FPS or remove tracking passes. Tracking consistency, GPU memory, and throughput
 still need measurement on the GPU VM; no speedup factor is assumed.
+
+### Hugging Face download concurrency
+
+Downloads default to one concurrent file. Set `SO101_HF_DOWNLOAD_WORKERS=4`
+when launching preprocessing to allow four concurrent file downloads. This
+controls snapshot file downloads, not video decoding, tracking, or the Hub's
+internal per-file transfer threads. Existing 429 retries remain enabled; reduce
+the worker count if rate-limit waits increase. Restart the process to apply it.
+
+```bash
+SO101_HF_DOWNLOAD_WORKERS=4 bash scripts/preprocess_so101_grounded.sh
+```

@@ -97,6 +97,14 @@ def install_hf_download_guards(
     Call this after importing ``lerobot`` so already-bound ``snapshot_download``
     references are patched too.
     """
+    configured_workers = os.environ.get("SO101_HF_DOWNLOAD_WORKERS")
+    if configured_workers is not None:
+        try:
+            max_workers = int(configured_workers)
+        except ValueError as exc:
+            raise ValueError("SO101_HF_DOWNLOAD_WORKERS must be a positive integer") from exc
+    if max_workers < 1:
+        raise ValueError("Hub download workers must be positive")
     prepare_hf_hub_env()
 
     import huggingface_hub
