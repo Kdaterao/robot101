@@ -36,7 +36,6 @@ exec "${PROFILE[@]}" "$PYTHON" src/hf_preprocess_smolvla_grounded.py \
   --molmo-model allenai/Molmo2-4B --molmo-backend molmo2 \
   --molmo-connector-repo kdaterao/so101-molmo2-4b-gripper \
   --molmo-dtype bf16 --device cuda --video-backend pyav \
-  --tapir-segment-batch-size "${SO101_TAPIR_SEGMENT_BATCH_SIZE:-0}" \
   --tapir-frame-batch-size "${SO101_TAPIR_FRAME_BATCH_SIZE:-16}" \
   --third-person-tracking-fps "${SO101_THIRD_PERSON_TRACKING_FPS:-1}" \
   --cluster-tail-frames 30 --tapnet-checkpoint "$CHECKPOINT" \

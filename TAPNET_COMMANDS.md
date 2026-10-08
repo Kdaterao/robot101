@@ -761,33 +761,3 @@ the worker count if rate-limit waits increase. Restart the process to apply it.
 ```bash
 SO101_HF_DOWNLOAD_WORKERS=4 bash scripts/preprocess_so101_grounded.sh
 ```
-
-### Batch all prepared episode segments
-
-Grounded preprocessing now grounds all third-person stage cameras first and
-collects their candidate tracking requests alongside selected POV backward
-clips. Those independent clips run together in TAPIR's video batch dimension,
-with separate query sets and causal states. Unequal point counts and terminal
-clip lengths are padded internally; padded points and frames are discarded.
-The previous-stage POV carryover clips depend on the backward results and run
-in a second combined batch. Tail tracking still precedes clustering.
-
-`--tapir-segment-batch-size 0` (default) batches all ready clips in each episode,
-not all episodes in the dataset. Positive values cap independent clips per
-batch. CUDA OOM retries reduce temporal chunk size, then split segment groups
-if necessary. Failed jobs are reported individually. Endpoint fallback remains
-restricted to the exact subtask endpoint. Some fallback Molmo requests occur
-after candidate tracking reveals a failure.
-
-```bash
-SO101_TAPIR_SEGMENT_BATCH_SIZE=0 \
-SO101_TAPIR_FRAME_BATCH_SIZE=64 \
-SO101_HF_DOWNLOAD_WORKERS=8 \
-SO101_DST_REPO=kdaterao/so101_grounded_segment_batch_test_v1 \
-bash scripts/preprocess_so101_grounded.sh
-```
-
-Segment concurrency multiplies the memory needed for temporal batching. Start
-with a smaller temporal batch than a single-segment run. To cap concurrency,
-set `SO101_TAPIR_SEGMENT_BATCH_SIZE=2`; `1` processes one independent clip at a
-time. GPU throughput and output quality must still be measured on the VM.
