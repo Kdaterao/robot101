@@ -6,6 +6,7 @@ No AprilTag / LilyTags. Eye-in-hand (wrist) camera assumed.
 from __future__ import annotations
 
 import json
+from itertools import islice
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -334,9 +335,13 @@ class BootsTAPIR:
         checkpoint: str | Path = DEFAULT_CHECKPOINT,
         device: str | torch.device | None = None,
         track_size: tuple[int, int] | None = (256, 256),
+        frame_batch_size: int = 1,
     ):
         # Frames are resized to track_size (w, h) for TAPIR; all point
         # coordinates in/out stay in the caller's full-resolution pixels.
+        if frame_batch_size < 1:
+            raise ValueError("TAPIR frame_batch_size must be positive")
+        self.frame_batch_size = int(frame_batch_size)
         self.track_size = track_size
         self.device = resolve_torch_device(device)
         checkpoint = Path(checkpoint)
@@ -399,9 +404,29 @@ class BootsTAPIR:
         causal_state,
     ) -> tuple[np.ndarray, np.ndarray, Any]:
         """Returns tracks [N,2] (full-res px), visibles [N], updated causal_state."""
-        small, sx, sy = self._resize(frame_rgb)
-        frame = torch.tensor(small, device=self.device)
-        frames = self.preprocess(frame[None, None])
+        tracks, visible, causal_state = self.predict_batch([frame_rgb], features, causal_state)
+        return tracks[:, 0], visible[:, 0], causal_state
+
+    def predict_batch(
+        self,
+        frames_rgb,
+        features: QueryFeatures,
+        causal_state,
+    ) -> tuple[np.ndarray, np.ndarray, Any]:
+        """Process a temporal chunk, returning [N,T,2], [N,T], and causal state.
+
+        Time stays in the model's temporal dimension, not the independent-video
+        batch dimension. The returned state must seed the next ordered chunk.
+        """
+        resized = [self._resize(frame) for frame in frames_rgb]
+        if not resized:
+            raise ValueError("TAPIR predict_batch requires at least one frame")
+        small, sx, sy = resized[0]
+        if any(frame.shape != small.shape or x != sx or y != sy for frame, x, y in resized):
+            raise ValueError("TAPIR temporal chunks require consistent frame dimensions")
+        # One upload and one feature-extraction call for the whole chunk.
+        video = torch.as_tensor(np.stack([frame for frame, _, _ in resized]), device=self.device)
+        frames = self.preprocess(video[None])
         feature_grids = self.model.get_feature_grids(frames, is_training=False)
         trajectories = self.model.estimate_trajectories(
             frames.shape[-3:-1],
@@ -413,18 +438,17 @@ class BootsTAPIR:
             causal_context=causal_state,
             get_causal_context=True,
         )
-        causal_state = trajectories["causal_context"]
-        del trajectories["causal_context"]
+        next_state = trajectories["causal_context"]
         tracks = trajectories["tracks"][-1]
         occlusions = trajectories["occlusion"][-1]
         uncertainty = trajectories["expected_dist"][-1]
         visibles = (1 - F.sigmoid(occlusions)) * (1 - F.sigmoid(uncertainty)) > 0.2
-        # tracks: [1, N, 1, 2] → [N, 2]
-        track_np = tracks[0, :, 0, :].detach().cpu().numpy().astype(np.float32)
-        track_np[:, 0] /= sx
-        track_np[:, 1] /= sy
-        vis_np = visibles[0, :, 0].detach().cpu().numpy().astype(bool)
-        return track_np, vis_np, causal_state
+        # Copy each output once per chunk instead of once per frame.
+        track_np = tracks[0].detach().cpu().numpy().astype(np.float32)
+        track_np[..., 0] /= sx
+        track_np[..., 1] /= sy
+        vis_np = visibles[0].detach().cpu().numpy().astype(bool)
+        return track_np, vis_np, next_state
 
     def track_with_features(
         self,
@@ -445,19 +469,32 @@ class BootsTAPIR:
         causal = self.initial_causal_state(N, features)
         tracks: list[np.ndarray] = []
         visibility: list[np.ndarray] = []
+        iterator = iter(frames_rgb)
+        processed = 0
         log_every = max(1, (num_frames or 100) // 10)
-        for t, frame in enumerate(frames_rgb):
-            pts, vis, causal = self.predict(frame, features, causal)
+        next_log = 1
+        while True:
+            chunk = list(islice(iterator, self.frame_batch_size))
+            if not chunk:
+                break
+            if self.frame_batch_size == 1:
+                pts, vis, causal = self.predict(chunk[0], features, causal)
+                pts, vis = pts[:, None, :], vis[:, None]
+            else:
+                pts, vis, causal = self.predict_batch(chunk, features, causal)
             tracks.append(pts)
             visibility.append(vis)
-            if t % log_every == 0 or (num_frames is not None and t == num_frames - 1):
+            processed += len(chunk)
+            if processed >= next_log or (num_frames is not None and processed == num_frames):
                 print(
-                    f"  TAPIR {label} [{self.device}] frame {t + 1}/{num_frames or '?'}",
+                    f"  TAPIR {label} [{self.device}] frame {processed}/{num_frames or '?'} "
+                    f"(frame batch={self.frame_batch_size})",
                     flush=True,
                 )
+                next_log = processed + log_every
         if not tracks:
             return np.zeros((N, 0, 2), np.float32), np.zeros((N, 0), bool)
-        return np.stack(tracks, axis=1), np.stack(visibility, axis=1)
+        return np.concatenate(tracks, axis=1), np.concatenate(visibility, axis=1)
 
     def track_segment_backward(
         self,
@@ -519,23 +556,9 @@ class BootsTAPIR:
             axis=1,
         )
         features = self.init_features(frames_rgb[t0], query_tyx)
-        causal = self.initial_causal_state(len(query_xy), features)
-
-        T = len(frames_rgb)
-        N = len(query_xy)
-        tracks = np.zeros((N, T, 2), dtype=np.float32)
-        visibility = np.zeros((N, T), dtype=bool)
-
-        log_every = max(1, T // 10)
-        for t, frame in enumerate(frames_rgb):
-            pts, vis, causal = self.predict(frame, features, causal)
-            tracks[:, t] = pts
-            visibility[:, t] = vis
-            if t % log_every == 0 or t == T - 1:
-                print(
-                    f"  TAPIR [{self.device}] frame {t + 1}/{T}",
-                    flush=True,
-                )
+        tracks, visibility = self.track_with_features(
+            frames_rgb, features, num_frames=len(frames_rgb)
+        )
 
         # Ensure query frame matches query (TAPIR may drift on t0)
         tracks[:, t0, 0] = np.clip(query_xy[:, 0], 0, w - 1)

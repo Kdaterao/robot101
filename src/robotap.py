@@ -96,6 +96,8 @@ def events_from_gripper_thresholds(
     smooth_window: int = 5,
     lookback_frames: int = 15,
     range_eps: float = 1e-3,
+    min_change_frac: float | None = None,
+    min_change_abs: float = 0.0,
 ) -> list[dict]:
     """Detect grasp/release from per-episode gripper min/max + gripper velocity.
 
@@ -107,11 +109,19 @@ def events_from_gripper_thresholds(
     ``|v| <= vel_stall`` for ``min_dwell_frames``, and only if ``|v|`` recently
     exceeded ``vel_min`` (filters idle chatter). Returns events.json-compatible
     dicts with type ``grasp`` (settled closed) or ``release`` (settled open).
+    If ``min_change_frac`` is supplied, use settled directional movements
+    instead of absolute bands. The required displacement is the larger of
+    that fraction of the smoothed episode range and ``min_change_abs``.
+    This detects partial grasps and releases away from the range extremes.
     """
     g_raw = np.asarray(gripper, dtype=np.float64).reshape(-1)
     T = int(g_raw.shape[0])
     if T == 0:
         return []
+    if min_change_frac is not None and not (0 < min_change_frac <= 1):
+        raise ValueError("min_change_frac must be in (0, 1]")
+    if not np.isfinite(min_change_abs) or min_change_abs < 0:
+        raise ValueError("min_change_abs must be finite and nonnegative")
     if not (0.0 <= closed_frac < open_frac <= 1.0):
         raise ValueError(
             f"need 0 <= closed_frac < open_frac <= 1, got "
@@ -158,6 +168,37 @@ def events_from_gripper_thresholds(
     def recent_motion(t: int) -> bool:
         t0 = max(0, t - lookback + 1)
         return bool(np.max(np.abs(v[t0 : t + 1])) >= float(vel_min))
+
+    if min_change_frac is not None:
+        required = max(float(min_change_frac) * span, float(min_change_abs))
+        direction, origin, origin_frame = 0, float(g[0]), 0
+        for t in range(1, T):
+            # Reversals begin a new movement at the previous local extremum.
+            # Ignore stationary jitter when deciding movement direction.
+            if abs(v[t]) >= float(vel_min) and abs(v[t]) > float(vel_stall):
+                sign = 1 if v[t] > 0 else -1
+                if sign != direction:
+                    direction, origin, origin_frame = sign, float(g[t - 1]), t - 1
+                    dwell_count = 0
+            change = direction * (float(g[t]) - origin)
+            if not direction or change < required or abs(v[t]) > float(vel_stall):
+                dwell_count = 0
+                continue
+            dwell_count += 1
+            kind = "release" if direction > 0 else "grasp"
+            if dwell_count < dwell_need or kind == last_emitted or not recent_motion(t):
+                continue
+            events.append({
+                "frame": int(t), "type": kind, "gripper": float(g_raw[t]),
+                "g_smooth": float(g[t]), "closed_thresh": closed_thresh,
+                "open_thresh": open_thresh, "g_min": g_min, "g_max": g_max,
+                "detector": "position_change", "movement_start_frame": origin_frame,
+                "position_change": float(change), "required_position_change": required,
+            })
+            last_emitted = kind
+            direction, origin, origin_frame = 0, float(g[t]), t
+            dwell_count = 0
+        return events
 
     for t in range(T):
         if g[t] <= closed_thresh:

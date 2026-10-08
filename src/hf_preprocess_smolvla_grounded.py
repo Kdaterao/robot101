@@ -5,7 +5,8 @@ Query descriptors sampled from multiple stage-tail frames keep the same identity
 across demonstrations. Points are selected from their stage-tail tracks and
 then tracked backward through each full stage. Third-person points are grounded
 from task noun phrases plus the gripper, associated at the stage endpoint, and
-tracked forward from the selected stage-start points. Per-stage diagnostics are
+tracked forward at a configurable sparse rate. Unresolved objects use a static
+endpoint gripper snapshot. Per-stage diagnostics are
 written beside the LeRobot output in ``point_tracks/``.
 """
 
@@ -235,6 +236,55 @@ def _select_pov_points(
     return selected, n_aligned
 
 
+def _third_person_sample_indices(length: int, fps: float, tracking_fps: float,
+                                 masks: np.ndarray) -> np.ndarray:
+    """Always include endpoints; only track actual camera frames."""
+    if fps <= 0 or tracking_fps <= 0:
+        raise ValueError("Source and third-person tracking FPS must be positive")
+    stride = max(1.0, fps / tracking_fps)
+    indices = np.unique(np.r_[np.rint(np.arange(0, length, stride)).astype(int), 0, length - 1])
+    indices = indices[(indices >= 0) & (indices < length)]
+    return indices[np.asarray(masks, bool)[indices]]
+
+
+def _expand_sparse_tracks(tracks, visible, indices, masks):
+    """Interpolate coordinates between visible samples; hold sampled visibility."""
+    frames = np.arange(len(masks))
+    previous = np.clip(np.searchsorted(indices, frames, side="right") - 1, 0, len(indices) - 1)
+    full = np.zeros((len(tracks), len(frames), 2), np.float32)
+    full_visible = visible[:, previous].copy()
+    for i in range(len(tracks)):
+        valid = visible[i] & np.isfinite(tracks[i]).all(axis=1)
+        if not valid.any():
+            full_visible[i] = False
+            continue
+        for axis in range(2):
+            full[i, :, axis] = np.interp(frames, indices[valid], tracks[i, valid, axis])
+        full_visible[i] &= np.isfinite(tracks[i, previous]).all(axis=1)
+    full_visible[:, ~np.asarray(masks, bool)] = False
+    return full, full_visible
+
+
+def _bridge_visibility_gaps(tracks, visible, masks, max_gap_frames):
+    """Interpolate bounded confidence gaps; never fill missing camera frames."""
+    tracks = np.asarray(tracks, dtype=np.float32).copy()
+    visible = np.asarray(visible, dtype=bool).copy()
+    masks = np.asarray(masks, dtype=bool)
+    visible &= masks[None, :] & np.isfinite(tracks).all(axis=-1)
+    for point in range(len(tracks)):
+        anchors = np.flatnonzero(visible[point])
+        for left, right in zip(anchors[:-1], anchors[1:]):
+            gap = right - left - 1
+            if 0 < gap <= max_gap_frames and masks[left:right + 1].all():
+                weight = np.arange(1, gap + 1, dtype=np.float32) / (gap + 1)
+                tracks[point, left + 1:right] = (
+                    tracks[point, left] * (1 - weight[:, None])
+                    + tracks[point, right] * weight[:, None]
+                )
+                visible[point, left + 1:right] = True
+    return tracks, visible
+
+
 def _ground_and_track_camera(
     tapir: BootsTAPIR,
     molmo: MolmoPointWorker | Molmo2Worker,
@@ -245,22 +295,66 @@ def _ground_and_track_camera(
     threshold: float,
     ambiguity_margin: float,
     label: str,
+    fps: float = 30.0,
+    tracking_fps: float = 1.0,
+    episode_gripper_cache: dict | None = None,
+    visibility_gap_seconds: float = 2.0,
 ) -> dict:
-    """Ground candidates on the stage start, track, associate at stage end, retrack POI."""
+    """Associate sparse semantic tracks; otherwise freeze an endpoint gripper snapshot."""
     clip = frames[stage.start : stage.end + 1]
     if not clip:
         return {"status": "failed", "reason": "empty_stage", "tracks": [], "visibility": []}
+    stage_masks = np.asarray(masks[stage.start : stage.end + 1], dtype=bool)
+    groundings: dict[str, dict] = {}
+    failures: list[str] = []
+    sample_indices = None
+    h, w = clip[0].shape[:2]
+    episode_gripper_cache = {} if episode_gripper_cache is None else episode_gripper_cache
+
+    def fallback(reason, tracked_points=None, tracked_vis=None):
+        """Freeze gripper coordinates, never the moving gripper trajectory."""
+        failures.append(reason)
+        snapshot = len(clip) - 1 if len(clip) and stage_masks[-1] else None
+        snapshot_source = "subtask_end"
+        points = np.zeros((0, 2), np.float32)
+        if snapshot is not None and tracked_points is not None:
+            points = _valid_points({"points_xy": tracked_points[tracked_vis[:, snapshot], snapshot]}, w, h)
+        if snapshot is not None and not len(points):
+            try:
+                print(f"  Molmo {label}: fallback gripper snapshot at stage-end frame {stage.end}", flush=True)
+                raw = molmo.ground(clip[snapshot], f"Point to the {GRIPPER_QUERY}.")
+                points = _valid_points(raw, w, h)
+                groundings["fallback_gripper_snapshot"] = {
+                    "frame": stage.end, "points_xy": points.tolist(),
+                    "raw_response": str(raw.get("raw_response", "")),
+                }
+            except Exception as exc:
+                failures.append(f"fallback_gripper_grounding_failed:{exc}")
+        # Coordinates from any other time can represent a different goal.
+        # Leave this stage unresolved if its exact endpoint has no valid point.
+        tracks = np.repeat(points[:, None, :], len(clip), axis=1)
+        visible = np.repeat(stage_masks[None, :], len(points), axis=0)
+        return {
+            "status": "ok" if len(points) else "failed", "reason": reason if len(points) else "fallback_gripper_unresolved",
+            "failures": sorted(set(failures)), "source": "gripper_fallback" if len(points) else "none",
+            "fallback_mode": "static_snapshot", "snapshot_frame": stage.start + snapshot if len(points) else None,
+            "snapshot_source": snapshot_source if len(points) else None,
+            "entity": None, "distance_to_gripper": None, "image_size": [w, h],
+            "initial_points": points.tolist(),
+            "initial_points_norm": (points / np.array([max(1, w - 1), max(1, h - 1)])).tolist(),
+            "tracks": tracks.tolist(), "visibility": visible.tolist(),
+            "tracks_normalized": (tracks / np.array([max(1, w - 1), max(1, h - 1)])).tolist(),
+            "groundings": groundings, "tracking_fps": tracking_fps,
+        }
+
     start_real = bool(masks[stage.start])
     if not start_real:
-        return {"status": "failed", "reason": "missing_start_frame", "tracks": [], "visibility": []}
+        return fallback("missing_start_frame")
     if not bool(masks[stage.end]):
-        return {"status": "failed", "reason": "missing_end_frame", "tracks": [], "visibility": []}
+        return fallback("missing_end_frame")
     frame = clip[0]
-    h, w = frame.shape[:2]
-    groundings: dict[str, dict] = {}
     point_parts: list[np.ndarray] = []
     ranges: dict[str, tuple[int, int]] = {}
-    failures: list[str] = []
     for entity in entities:
         prompt = f"Point to the {entity}."
         started = perf_counter()
@@ -290,43 +384,27 @@ def _ground_and_track_camera(
             failures.append(f"{entity}_grounding_failed")
 
     if GRIPPER_QUERY not in ranges:
-        return {
-            "status": "failed",
-            "reason": "gripper_grounding_failed",
-            "failures": sorted(set(failures + ["gripper_grounding_failed"])),
-            "groundings": groundings,
-            "tracks": [],
-            "visibility": [],
-            "source": "none",
-        }
+        return fallback("gripper_grounding_failed")
+    if len(ranges) == 1:
+        return fallback("no_semantic_object_grounded")
 
     all_points = np.concatenate(point_parts, axis=0).astype(np.float32)
     tracking_started = perf_counter()
+    sample_indices = _third_person_sample_indices(len(clip), fps, tracking_fps, stage_masks)
     try:
-        candidates, candidate_vis, _, _ = tapir.track_video(clip, all_points, query_frame_index=0)
-        print(f"  TAPIR {label}: {len(clip)} frames / {len(all_points)} points in {perf_counter()-tracking_started:.1f}s", flush=True)
+        candidates, candidate_vis, _, _ = tapir.track_video(
+            [clip[i] for i in sample_indices], all_points, query_frame_index=0)
+        candidates, candidate_vis = _expand_sparse_tracks(candidates, candidate_vis, sample_indices, stage_masks)
+        print(f"  TAPIR {label}: {len(sample_indices)}/{len(clip)} frames at {tracking_fps:g} FPS / "
+              f"{len(all_points)} points in {perf_counter()-tracking_started:.1f}s", flush=True)
     except Exception as exc:
-        return {
-            "status": "failed", "reason": f"candidate_tracking_failed:{exc}",
-            "failures": sorted(set(failures + ["candidate_tracking_failed"])),
-            "groundings": groundings, "tracks": [], "visibility": [], "source": "none",
-        }
-    stage_masks = masks[stage.start : stage.end + 1]
-    candidate_vis[:, ~stage_masks] = False
+        return fallback(f"candidate_tracking_failed:{exc}")
     end_points, reaches_end = _last_endpoint(candidates, candidate_vis)
     gi0, gi1 = ranges[GRIPPER_QUERY]
     gripper_ids = np.arange(gi0, gi1)
     live_gripper = gripper_ids[reaches_end[gripper_ids]]
     if not len(live_gripper):
-        return {
-            "status": "failed",
-            "reason": "tracker_lost_gripper",
-            "failures": sorted(set(failures + ["tracker_lost_gripper"])),
-            "groundings": groundings,
-            "tracks": [],
-            "visibility": [],
-            "source": "none",
-        }
+        return fallback("tracker_lost_gripper", candidates[gripper_ids], candidate_vis[gripper_ids])
 
     def norm(p):
         return np.asarray(p, dtype=np.float32) / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
@@ -348,17 +426,12 @@ def _ground_and_track_camera(
     close = [x for x in semantic_distances if x[0] <= threshold]
     ambiguous = len(close) > 1 and (close[1][0] - close[0][0]) <= ambiguity_margin
     if ambiguous:
-        source, entity, distance = "gripper_fallback", None, None
-        failures.append("ambiguous_object_match")
-        status, reason = "failed", "ambiguous_object_match"
-        chosen_ids = live_gripper
+        return fallback("ambiguous_object_match", candidates[gripper_ids], candidate_vis[gripper_ids])
     elif close:
         distance, entity, chosen_ids = close[0]
         source, status, reason = "semantic_object", "ok", None
     else:
-        source, entity, distance = "gripper_fallback", None, None
-        status, reason = "ok", "no_semantic_object_near_gripper"
-        chosen_ids = live_gripper
+        return fallback("no_semantic_object_near_gripper", candidates[gripper_ids], candidate_vis[gripper_ids])
 
     initial_points = all_points[chosen_ids]
     # Each query has an independent causal state. Reuse the chosen trajectories
@@ -379,6 +452,11 @@ def _ground_and_track_camera(
         final_vis = final_vis[keep]
         initial_points = initial_points[keep]
 
+    raw_final_vis = final_vis.copy()
+    final_tracks, final_vis = _bridge_visibility_gaps(
+        final_tracks, final_vis, stage_masks, round(fps * visibility_gap_seconds)
+    )
+
     return {
         "status": status,
         "reason": reason,
@@ -395,7 +473,11 @@ def _ground_and_track_camera(
             final_tracks / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
         ).tolist(),
         "visibility": final_vis.tolist(),
+        "raw_visibility": raw_final_vis.tolist(),
+        "visibility_gap_seconds": visibility_gap_seconds,
         "groundings": groundings,
+        "tracking_fps": tracking_fps,
+        "tracking_sample_frames": (sample_indices + stage.start).tolist(),
     }
 
 
@@ -415,14 +497,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-task-objects", type=int, default=8)
     p.add_argument("--object-proximity-threshold", type=float, default=0.08)
     p.add_argument("--ambiguity-margin", type=float, default=0.01)
+    p.add_argument("--third-person-tracking-fps", type=float, default=1.0,
+                   help="TAPIR rate for top/side cameras; endpoints included, coordinates interpolated to source FPS")
     p.add_argument("--tapnet-checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     p.add_argument("--dry-run", action="store_true", help="Only detect gripper stages; do not load models or write")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--push-to-hub", action="store_true")
     p.add_argument("--first-primitive", default="grasp", choices=["grasp", "release"])
     p.add_argument("--max-stages", type=int, default=32)
-    p.add_argument("--min-stage-frames", type=int, default=5)
+    p.add_argument("--min-stage-frames", type=int, default=1, help="Minimum gap between event boundaries; preserves quick reversals")
     p.add_argument("--gripper-source", default="state", choices=["state", "action"])
+    p.add_argument("--gripper-event-mode", choices=["movement", "bands"], default="movement")
+    p.add_argument("--gripper-min-change-frac", type=float, default=0.25,
+                   help="Movement required as a fraction of the smoothed episode gripper range")
+    p.add_argument("--gripper-min-change-abs", type=float, default=0.0,
+                   help="Additional minimum displacement in dataset gripper units")
     p.add_argument("--gripper-closed-frac", type=float, default=0.15)
     p.add_argument("--gripper-open-frac", type=float, default=0.85)
     p.add_argument("--gripper-min-dwell-frames", type=int, default=3)
@@ -437,9 +526,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--static-thresh", type=float, default=0.03)
     p.add_argument("--funnel-quantile", type=float, default=0.4)
     p.add_argument("--goal-tail-frames", type=int, default=5)
+    p.add_argument("--pov-track-previous-stage", action=argparse.BooleanOptionalAction, default=True,
+                   help="Continue the preceding stage's POV points forward alongside current-stage points")
+    p.add_argument("--pov-visibility-gap-seconds", type=float, default=0.5, help="Bridge short bounded TAPIR confidence gaps; 0 disables")
+    p.add_argument("--third-person-visibility-gap-seconds", type=float, default=2.0, help="Bridge bounded confidence gaps after sparse tracking; 0 disables")
     p.add_argument("--heatmap-sigma", type=float, default=40.0)
     p.add_argument("--heatmap-alpha", type=float, default=0.55)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--tapir-frame-batch-size", type=int, default=16,
+                   help="Ordered frames per causal TAPIR call; 1 restores per-frame tracking")
     p.add_argument("--tapir-tf32", action="store_true", help="Allow faster TF32 FP32 operations on Ampere GPUs; may slightly change tracks")
     p.add_argument("--decode-batch-size", type=int, default=64, help="Frames per video seek; increase with available CPU RAM")
     p.add_argument("--video-backend", default="pyav", choices=["pyav", "torchcodec"])
@@ -450,14 +545,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if any(not np.isfinite(v) or v < 0 for v in (args.pov_visibility_gap_seconds, args.third_person_visibility_gap_seconds)):
+        raise SystemExit("Visibility gap seconds must be finite and nonnegative")
     if args.query_frames_per_stage < 1 or args.num_sample_points < 1:
         raise SystemExit("Query frame and sample point counts must be positive")
     if args.cluster_tail_frames < 1:
         raise SystemExit("--cluster-tail-frames must be positive")
+    if args.tapir_frame_batch_size < 1:
+        raise SystemExit("--tapir-frame-batch-size must be positive")
     if args.decode_batch_size < 1:
         raise SystemExit("--decode-batch-size must be positive")
     if args.object_proximity_threshold < 0 or args.ambiguity_margin < 0:
         raise SystemExit("distance threshold and ambiguity margin must be non-negative")
+    if not np.isfinite(args.third_person_tracking_fps) or args.third_person_tracking_fps <= 0:
+        raise SystemExit("--third-person-tracking-fps must be positive and finite")
+    if not 0 < args.gripper_min_change_frac <= 1 or not np.isfinite(args.gripper_min_change_abs) or args.gripper_min_change_abs < 0:
+        raise SystemExit("Gripper change fraction must be in (0, 1]; absolute change must be finite and nonnegative")
+    if args.min_stage_frames < 1 or args.max_stages < 1:
+        raise SystemExit("Stage frame/count limits must be positive")
     LeRobotDataset, LeRobotDatasetMetadata, DEFAULT_FEATURES, HF_LEROBOT_HOME = _load_lerobot()
     ep_filter = _parse_episodes(args.episodes)
     src_root = HF_LEROBOT_HOME / args.src_repo_id
@@ -509,6 +614,8 @@ def main() -> None:
                 grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
                 min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
                 vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
+                min_change_frac=args.gripper_min_change_frac if args.gripper_event_mode == "movement" else None,
+                min_change_abs=args.gripper_min_change_abs,
             )
             stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
             print(f"episode {ep_idx}: {len(events)} gripper events, stages=" + ", ".join(f"[{s.start},{s.end}]" for s in stages))
@@ -526,7 +633,9 @@ def main() -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         print("TF32 enabled for CUDA FP32 operations", flush=True)
-    tapir = BootsTAPIR(checkpoint=args.tapnet_checkpoint, device=args.device)
+    print(f"TAPIR temporal frame batch: {args.tapir_frame_batch_size}", flush=True)
+    tapir = BootsTAPIR(checkpoint=args.tapnet_checkpoint, device=args.device,
+                      frame_batch_size=args.tapir_frame_batch_size)
     if args.molmo_backend == "molmo2":
         molmo = Molmo2Worker(
             args.molmo_model, device=args.device, dtype=args.molmo_dtype,
@@ -557,6 +666,8 @@ def main() -> None:
                 grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
                 min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
                 vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
+                min_change_frac=args.gripper_min_change_frac if args.gripper_event_mode == "movement" else None,
+                min_change_abs=args.gripper_min_change_abs,
             )
             stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
             if len(stages) > args.max_stages:
@@ -659,10 +770,13 @@ def main() -> None:
             continue
         stages = stage_lists[epi]
         n = data["n"]
-        wrist_tracks = np.zeros((n, args.num_poi_points, 2), dtype=np.float32)
-        wrist_vis = np.zeros((n, args.num_poi_points), dtype=bool)
+        pov_slots = args.num_poi_points * (2 if args.pov_track_previous_stage else 1)
+        wrist_tracks = np.zeros((n, pov_slots, 2), dtype=np.float32)
+        wrist_vis = np.zeros((n, pov_slots), dtype=bool)
+        previous_pov = None
         wrist_frames = data["frames"][CAMERA_WRIST]
         episode_records = []
+        episode_gripper_caches = {cam: {} for cam in CAMERAS_3P}
         task = _task_text(data["tasks"])
         try:
             nouns = _extract_noun_phrases(task, nlp, args.max_task_objects)
@@ -677,6 +791,10 @@ def main() -> None:
         for si, st in enumerate(stages):
             stage_started = perf_counter()
             print(f"  stage {si}: {st.end-st.start+1} frames", flush=True)
+            # Inclusive stage boundaries may share a frame; reset slots so
+            # an older stage cannot leak into the new current/previous pair.
+            wrist_tracks[st.start:st.end + 1] = 0
+            wrist_vis[st.start:st.end + 1] = False
             cache = tail_cache[epi][si]
             ids = selected_ids.get((epi, si), np.zeros(0, dtype=np.int64))
             pov_failure = None
@@ -687,12 +805,18 @@ def main() -> None:
                 full_clip = wrist_frames[st.start : st.end + 1]
                 back_tracks = np.zeros((len(end_points), len(full_clip), 2), dtype=np.float32)
                 back_vis = np.zeros((len(end_points), len(full_clip)), dtype=bool)
+                raw_back_vis = back_vis.copy()
                 if len(full_clip) and bool(data["masks"][CAMERA_WRIST][st.end]):
                     try:
                         back_tracks, back_vis = tapir.track_segment_backward(
                             full_clip, end_points, label=f"ep{ep_idx}/stage{si}/pov-back"
                         )
                         back_vis[:, ~data["masks"][CAMERA_WRIST][st.start : st.end + 1]] = False
+                        raw_back_vis = back_vis.copy()
+                        back_tracks, back_vis = _bridge_visibility_gaps(
+                            back_tracks, back_vis, data["masks"][CAMERA_WRIST][st.start : st.end + 1],
+                            round(fps * args.pov_visibility_gap_seconds),
+                        )
                         print(f"  wrist backtracking finished in {perf_counter()-stage_started:.1f}s", flush=True)
                     except Exception as exc:
                         pov_failure = f"pov_tracking_failed:{exc}"
@@ -706,7 +830,49 @@ def main() -> None:
                 end_points = np.zeros((0, 2), dtype=np.float32)
                 back_tracks = np.zeros((0, st.end - st.start + 1, 2), dtype=np.float32)
                 back_vis = np.zeros((0, st.end - st.start + 1), dtype=bool)
+                raw_back_vis = back_vis.copy()
                 pov_failure = "no_active_points_selected"
+
+            # Continue only the immediately preceding stage's current points.
+            # Seed on their actual endpoint frame, then track forward; never
+            # freeze old coordinates or recursively accumulate older stages.
+            previous_record = {
+                "source_subtask": si - 1 if si else None,
+                "status": "disabled" if not args.pov_track_previous_stage else "unavailable",
+                "tracks": [], "visibility": [], "raw_visibility": [],
+            }
+            if args.pov_track_previous_stage and previous_pov is not None:
+                seed_frame, seed_tracks, seed_vis = previous_pov
+                seeds = seed_tracks[seed_vis & np.isfinite(seed_tracks).all(axis=1)][:args.num_poi_points]
+                if len(seeds) and data["masks"][CAMERA_WRIST][seed_frame]:
+                    try:
+                        print(f"  POV stage {si}: continuing {len(seeds)} previous-stage points", flush=True)
+                        carry_tracks, carry_vis, _, _ = tapir.track_video(
+                            wrist_frames[seed_frame:st.end + 1], seeds, query_frame_index=0,
+                        )
+                        offset = st.start - seed_frame
+                        carry_tracks = carry_tracks[:, offset:]
+                        carry_vis = carry_vis[:, offset:]
+                        stage_masks = data["masks"][CAMERA_WRIST][st.start:st.end + 1]
+                        carry_vis[:, ~stage_masks] = False
+                        raw_carry_vis = carry_vis.copy()
+                        carry_tracks, carry_vis = _bridge_visibility_gaps(
+                            carry_tracks, carry_vis, stage_masks,
+                            round(fps * args.pov_visibility_gap_seconds),
+                        )
+                        count = len(seeds)
+                        slots = slice(args.num_poi_points, args.num_poi_points + count)
+                        wrist_tracks[st.start:st.end + 1, slots] = carry_tracks.transpose(1, 0, 2)
+                        wrist_vis[st.start:st.end + 1, slots] = carry_vis.T
+                        previous_record.update(
+                            status="ok", seed_frame=seed_frame, seed_points=seeds.tolist(),
+                            tracks=carry_tracks.tolist(), visibility=carry_vis.tolist(),
+                            raw_visibility=raw_carry_vis.tolist(),
+                        )
+                    except Exception as exc:
+                        previous_record.update(status="failed", reason=f"previous_pov_tracking_failed:{exc}")
+                        print(f"  POV carryover failed: {exc}", flush=True)
+            previous_pov = (st.end, back_tracks[:, -1].copy(), back_vis[:, -1].copy())
 
             third = {}
             for cam in CAMERAS_3P:
@@ -715,12 +881,15 @@ def main() -> None:
                 result = _ground_and_track_camera(
                     tapir, molmo, data["frames"][cam], data["masks"][cam], st,
                     entities, args.object_proximity_threshold, args.ambiguity_margin,
-                    f"ep{ep_idx}/stage{si}/{cam}",
+                    f"ep{ep_idx}/stage{si}/{cam}", fps=fps, tracking_fps=args.third_person_tracking_fps,
+                    episode_gripper_cache=episode_gripper_caches[cam],
+                    visibility_gap_seconds=args.third_person_visibility_gap_seconds,
                 )
                 if noun_failure:
-                    result["status"] = "failed"
-                    result["reason"] = noun_failure
                     result["failures"] = sorted(set(result.get("failures", []) + [noun_failure]))
+                    if not result.get("tracks"):
+                        result["status"] = "failed"
+                        result["reason"] = noun_failure
                 third[cam] = result
                 print(
                     f"  {cam} stage {si}: source={result.get('source')} entity={result.get('entity')} "
@@ -739,6 +908,9 @@ def main() -> None:
                     "query_ids": ids.tolist(),
                     "query_sources_episode_frame": query_sources[ids].tolist(),
                     "tracks": back_tracks.tolist(), "visibility": back_vis.tolist(),
+                    "raw_visibility": raw_back_vis.tolist(),
+                    "visibility_gap_seconds": args.pov_visibility_gap_seconds,
+                    "previous_stage": previous_record,
                 },
                 "grounding_model": {
                     "backend": args.molmo_backend, "base": args.molmo_model,
@@ -777,7 +949,8 @@ def main() -> None:
         sidecar_root = args.sidecar_dir or (dst_root / "point_tracks")
         sidecar_root.mkdir(parents=True, exist_ok=True)
         sidecar = sidecar_root / f"ep{ep_idx:06d}.json"
-        sidecar.write_text(json.dumps({"episode": ep_idx, "task": task, "entities": entities, "subtasks": episode_records}, indent=2) + "\n", encoding="utf-8")
+        sidecar.write_text(json.dumps({"episode": ep_idx, "destination_episode": int(dst.meta.total_episodes),
+                                      "task": task, "entities": entities, "subtasks": episode_records}, indent=2) + "\n", encoding="utf-8")
 
         # Render selected tracks into the camera streams used by the dataset.
         goals_by_stage = {}

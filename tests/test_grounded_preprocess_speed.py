@@ -24,7 +24,8 @@ except ModuleNotFoundError as exc:
 
 from grounded_episode_io import load_episode_metadata, decode_episode_cameras
 from hf_preprocess_smolvla_grounded import (
-    _ground_and_track_camera, _stage_cache_entry, _tail_query_frames, GRIPPER_QUERY)
+    _ground_and_track_camera, _stage_cache_entry, _tail_query_frames,
+    _third_person_sample_indices, _expand_sparse_tracks, GRIPPER_QUERY)
 from robotap import Stage
 
 
@@ -88,6 +89,127 @@ class DecodeTests(TestCase):
 
 
 class TrackingTests(TestCase):
+    def test_sparse_third_person_tracking_and_output_frame_rate(self):
+        masks = np.ones(62, bool)
+        indices = _third_person_sample_indices(62, 30, 1, masks)
+        self.assertEqual(indices.tolist(), [0, 30, 60, 61])
+        tracks = np.stack([indices, indices], axis=-1)[None].astype(np.float32)
+        full, visible = _expand_sparse_tracks(tracks, np.ones((1, 4), bool), indices, masks)
+        self.assertEqual(full.shape, (1, 62, 2))
+        np.testing.assert_allclose(full[0, :, 0], np.arange(62))
+        self.assertTrue(visible.all())
+        masks[30] = False
+        self.assertEqual(_third_person_sample_indices(62, 30, 1, masks).tolist(), [0, 60, 61])
+        _, visible = _expand_sparse_tracks(tracks, np.ones((1, 4), bool), indices, masks)
+        self.assertFalse(visible[0, 30])
+
+    def test_missing_object_freezes_endpoint_gripper_without_tracking(self):
+        class Molmo:
+            def ground(self, frame, prompt):
+                return {'points_xy': [[float(frame[0, 0, 0]), 10]] if 'gripper' in prompt else []}
+        class Tapir:
+            def track_video(self, *args, **kwargs):
+                raise AssertionError('No objects to associate: skip tracking')
+        frames = [np.full((100, 100, 3), 10 + i, np.uint8) for i in range(4)]
+        result = _ground_and_track_camera(Tapir(), Molmo(), frames, np.ones(4, bool),
+                                         Stage(0, 3, 'release'), [GRIPPER_QUERY, 'bucket'], .08, .01, 'fallback')
+        self.assertEqual(result['source'], 'gripper_fallback')
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['snapshot_frame'], 3)
+        np.testing.assert_allclose(result['tracks'], [[[13, 10]] * 4])
+        self.assertTrue(np.asarray(result['visibility']).all())
+
+    def test_lost_gripper_uses_fresh_endpoint_snapshot(self):
+        class Molmo:
+            def ground(self, frame, prompt):
+                return {'points_xy': [[70, 20]] if frame[0, 0, 0] == 3 else [[10, 10]]}
+        class Tapir:
+            def track_video(self, clip, queries, query_frame_index):
+                tracks = np.repeat(queries[:, None, :], len(clip), axis=1)
+                vis = np.ones(tracks.shape[:2], bool)
+                vis[0, -1] = False
+                return tracks, vis, None, None
+        frames = [np.full((100, 100, 3), i, np.uint8) for i in range(4)]
+        result = _ground_and_track_camera(Tapir(), Molmo(), frames, np.ones(4, bool),
+                                         Stage(0, 3, 'release'), [GRIPPER_QUERY, 'bucket'], .08, .01, 'lost')
+        self.assertEqual(result['reason'], 'tracker_lost_gripper')
+        self.assertEqual(result['source'], 'gripper_fallback')
+        np.testing.assert_allclose(result['tracks'], [[[70, 20]] * 4])
+
+    def test_lost_gripper_recovers_at_episode_end_and_caches_query(self):
+        class Molmo:
+            def __init__(self):
+                self.queries = []
+            def ground(self, frame, prompt):
+                index = int(frame[0, 0, 0])
+                self.queries.append(index)
+                if index == 2:
+                    return {'points_xy': []}
+                return {'points_xy': [[80, 20]] if index == 4 else [[10, 10]]}
+        class Tapir:
+            def track_video(self, clip, queries, query_frame_index):
+                tracks = np.repeat(queries[:, None, :], len(clip), axis=1)
+                visible = np.ones(tracks.shape[:2], bool)
+                visible[0, -1] = False
+                return tracks, visible, None, None
+        frames = [np.full((100, 100, 3), i, np.uint8) for i in range(5)]
+        molmo = Molmo()
+        cache = {}
+        for stage in [Stage(0, 2, 'grasp'), Stage(1, 2, 'release')]:
+            result = _ground_and_track_camera(Tapir(), molmo, frames, np.ones(5, bool),
+                stage, [GRIPPER_QUERY, 'bucket'], .08, .01, 'recover', episode_gripper_cache=cache)
+            self.assertEqual(result['snapshot_frame'], 4)
+            self.assertEqual(result['snapshot_source'], 'episode_end_recovery')
+            self.assertEqual(result['status'], 'ok')
+            np.testing.assert_allclose(result['tracks'], [[[80, 20]] * (stage.end-stage.start+1)])
+        self.assertEqual(molmo.queries.count(4), 1)
+
+    def test_episode_end_check_keeps_valid_subtask_goal(self):
+        class Molmo:
+            def __init__(self):
+                self.queries = []
+            def ground(self, frame, prompt):
+                index = int(frame[0, 0, 0])
+                self.queries.append(index)
+                return {'points_xy': [[index*10 + 10, 20]]}
+        class Tapir:
+            def track_video(self, clip, queries, query_frame_index):
+                tracks = np.repeat(queries[:, None, :], len(clip), axis=1)
+                visible = np.ones(tracks.shape[:2], bool)
+                visible[0, -1] = False
+                return tracks, visible, None, None
+        frames = [np.full((100, 100, 3), i, np.uint8) for i in range(5)]
+        molmo = Molmo()
+        result = _ground_and_track_camera(Tapir(), molmo, frames, np.ones(5, bool),
+            Stage(0, 2, 'grasp'), [GRIPPER_QUERY, 'bucket'], .08, .01, 'prefer-subtask')
+        self.assertIn(4, molmo.queries)
+        self.assertEqual(result['snapshot_frame'], 2)
+        np.testing.assert_allclose(result['tracks'], [[[30, 20]] * 3])
+
+    def test_no_nearby_object_freezes_tracked_endpoint(self):
+        class Molmo:
+            def ground(self, frame, prompt):
+                return {'points_xy': [[10, 10]] if 'gripper' in prompt else [[90, 90]]}
+        class Tapir:
+            def track_video(self, clip, queries, query_frame_index):
+                tracks = np.repeat(queries[:, None, :], len(clip), axis=1)
+                tracks[0, -1] = [30, 20]
+                return tracks, np.ones(tracks.shape[:2], bool), None, None
+        result = _ground_and_track_camera(Tapir(), Molmo(), [np.zeros((100, 100, 3), np.uint8)] * 4,
+            np.ones(4, bool), Stage(0, 3, 'release'), [GRIPPER_QUERY, 'bucket'], .08, .01, 'far')
+        self.assertEqual(result['source'], 'gripper_fallback')
+        np.testing.assert_allclose(result['tracks'], [[[30, 20]] * 4])
+
+    def test_empty_or_malformed_fallback_remains_unresolved(self):
+        class Molmo:
+            def ground(self, frame, prompt):
+                return {'points_xy': [[1, 2, 3]]}
+        result = _ground_and_track_camera(object(), Molmo(), [np.zeros((100, 100, 3), np.uint8)] * 2,
+            np.ones(2, bool), Stage(0, 1, 'release'), [GRIPPER_QUERY, 'bucket'], .08, .01, 'malformed')
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'fallback_gripper_unresolved')
+        self.assertEqual(result['tracks'], [])
+
     def test_shared_features_only_track_tail_and_mask_invalid_frames(self):
         bank = object()
         calls = []
@@ -214,7 +336,7 @@ class SkipFlowTests(TestCase):
                 _stage_cache_entry=tail,
                 _select_pov_points=lambda *args: ({(0, 0): np.array([0]), (1, 0): np.array([0])}, 1),
                 _extract_noun_phrases=lambda *args: ['cup'],
-                _ground_and_track_camera=lambda *args: dict(status='ok', tracks=[], visibility=[])), \
+                _ground_and_track_camera=lambda *args, **kwargs: dict(status='ok', tracks=[], visibility=[])), \
                 patch.dict(sys.modules, {'spacy': SimpleNamespace(load=lambda *args: object())}), \
                 patch.object(sys, 'argv', ['preprocess', '--episodes', '0-2', '--dst-repo-id', 'test/output']):
             pipeline.main()

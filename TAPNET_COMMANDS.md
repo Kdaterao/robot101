@@ -214,10 +214,26 @@ per stage; shorter stages use their full available length.
 `src/hf_preprocess_smolvla_grounded.py` is the point-grounding data-generation
 entrypoint. It extracts task noun phrases with spaCy, adds `robot gripper`, and
 uses Molmo2 with the SO-101 connector on each available top/side camera at every subtask start. TAPIR
-tracks all candidate points forward to the subtask endpoint; the nearest noun
+tracks candidate points forward at `--third-person-tracking-fps` (default 1 FPS),
+including both stage endpoints; coordinates are interpolated back to the source
+frame rate and sampled visibility is held between samples. The nearest noun
 entity to the gripper is selected when normalized distance is at most `0.08`.
-Otherwise it uses the gripper points as a fallback. The selected start-frame
-points reuse their candidate trajectories for the final third-person goal tracks.
+Otherwise it freezes the gripper coordinates at the stage endpoint as a static
+goal for the whole stage. If tracking loses the gripper, it asks Molmo for a
+fresh gripper snapshot on the exact subtask endpoint frame. Only a visible
+tracked endpoint or a valid Molmo point from that same frame can supply the
+fallback. Missing endpoint frames remain unresolved; coordinates from nearby
+frames, stage starts, or later episode frames are not substituted. Diagnostics
+record `snapshot_frame` and `snapshot_source`.
+If no valid snapshot exists, it records an unresolved fallback and omits the
+overlay. When no nouns are grounded it skips candidate tracking and directly
+grounds the endpoint gripper. Successful semantic objects reuse their candidate
+trajectories. POV tracking is unaffected by this third-person sampling rate.
+
+Set `SO101_THIRD_PERSON_TRACKING_FPS=5` on the launcher or pass
+`--third-person-tracking-fps 5` to adjust it. The output video's frame rate is
+unchanged. Sparse tracking reduces temporal detail; faster-moving targets may
+need a higher sampling rate.
 
 POV processing follows `src/old_tapnet/tapnetCreate.py`: it extracts one shared
 bank of TAPIR appearance features from multiple frames across the demos, then
@@ -443,8 +459,119 @@ Then open `http://127.0.0.1:8765` on your own computer. Optional flags:
 `--repo-id USER/DATASET`, `--revision REVISION`, `--config NAME`, and `--port 8766`.
 This viewer is for the labeled-image dataset, not the clustered LeRobot videos.
 
+### Random episode/subtask video viewer (local)
+
+```bash
+.venv/bin/python scripts/view_grounded_subtasks.py --open-browser
+```
+
+Defaults to the larger source dataset,
+`felsager/community_dataset_v3_ee_smolVLA`, and samples **3 distinct random
+episodes**. Gripper boundaries are recomputed automatically for raw source
+episodes; no saved tracking reports are required. Wrist/top/side videos play
+together, using LeRobot's per-camera episode timestamp offsets. Select an
+episode/subtask, or press Play with automatic advancement enabled to move
+through every subtask and then the next selected episode. For a preprocessed
+dataset it can instead use recorded `point_tracks/ep*.json` boundaries and show
+goal/fallback diagnostics. The viewer loads at most **3 episodes by default**.
+It searches ordered metadata shards for selected IDs and downloads only the
+frame-data files needed for those episodes. Saved reports are downloaded only
+when viewing a preprocessed dataset, not for the raw source.
+Videos download and cache on demand when their episode is selected. No GPU or model
+weights are needed. Change the dataset with `--repo-id OWNER/DATASET`, or use a
+local dataset directory with `--root /path/to/dataset`. Use the repo's existing
+`.venv` for gripper preview; viewing saved boundaries uses only
+`huggingface-hub`, `pandas`, and `pyarrow`.
+
+Use `--random-episodes X` to pick X distinct episodes, and `--seed 42` to repeat
+the same selection. Omit the seed to draw a new sample each run. Use
+`--max-episodes 1` for one random source episode. On preprocessed datasets,
+`--episode-offset 3 --max-episodes 3` selects the next three saved reports in
+sorted source-episode order. Automatic advancement
+stops at the end of the loaded selection. LeRobot may pack several episodes
+into one video file; downloading that shared file can include additional footage,
+but the viewer still limits playback to the selected episodes.
+
+To test five random source episodes with repeatable selection:
+
+```bash
+.venv/bin/python scripts/view_grounded_subtasks.py --open-browser \
+  --random-episodes 5 --seed 42 --gripper-min-change-frac 0.25
+```
+
+This downloads only the frame-data Parquet files containing the selected
+episodes, reads their gripper signals, and uses the same detector options as
+the inspector and grounded preprocessing to recompute playback boundaries.
+Shared Parquet files can contain other episodes, but only selected rows are
+used for detection. Tune with `--gripper-min-change-frac`,
+`--gripper-min-change-abs`, `--gripper-smooth-window`, and
+`--gripper-min-dwell-frames`. Saved reports and videos are not modified;
+embedded heatmaps remain tied to the old splits. Apply the same options when
+rerunning preprocessing to regenerate goals for the new splits.
+
+To view the earlier preprocessed test dataset, pass
+`--repo-id kdaterao/so101_pov_clustering_test_v2`. Add `--recompute-stages`
+to preview new boundaries on those saved videos.
+
+New preprocessing reports record the destination episode explicitly. Older
+reports, including earlier runs, are mapped in sorted source-episode order when
+their count matches the destination episode count; the viewer displays this
+assumption. Private repositories require a saved HF login or `HF_TOKEN`.
+
 
 ## Faster episode preprocessing
+
+### Inspect gripper stage splits
+
+Use the preprocessing environment to inspect episode segmentation before a GPU run:
+
+```bash
+source .venv-grounded/bin/activate
+python scripts/inspect_gripper_stages.py --episode 0
+```
+
+Open `outputs/gripper_stages/ep000000.html` in a browser (download it from the VM
+first). The interactive plot shows state/action gripper signals, detected
+grasp/release events, detector thresholds when events exist, and colored stage
+ranges. Click a stage to zoom and hover to inspect frame values. JSON and CSV
+reports are saved alongside the HTML. Adjacent stages share an inclusive
+boundary frame, exactly as in preprocessing. Detection uses the same functions,
+defaults, gripper index, and maximum stage truncation as the grounded pipeline;
+it loads no model weights and decodes no videos. A fresh source may still require
+LeRobot to download its dataset files.
+
+To inspect a different source or detector configuration:
+
+```bash
+python scripts/inspect_gripper_stages.py --episode 1 \
+  --gripper-source action --gripper-closed-frac 0.15 --gripper-open-frac 0.85
+```
+
+Pass the same gripper/stage flags to preprocessing when comparing results.
+
+Grounded preprocessing and the inspector now default to
+`--gripper-event-mode movement`: an opening or closing movement must change
+position by at least `--gripper-min-change-frac 0.25` of the smoothed episode
+range, then settle for the configured dwell time. Opening emits `release`;
+closing emits `grasp`, including partial grasps that stop outside the old closed
+band. Small movements below this displacement threshold do not split a stage.
+The minimum stage gap defaults to one frame so quick release/grasp reversals
+are not discarded by the former five-frame stage filter. Movement size and
+dwell requirements still apply.
+
+Use `--gripper-min-change-abs VALUE` to set an additional minimum displacement
+in the dataset's gripper units; this is useful for episodes whose entire range
+is small jitter. Both the relative and absolute limits must be met. If a real
+quick reversal is suppressed by smoothing or the three-frame settling period,
+inspect with `--gripper-smooth-window 1 --gripper-min-dwell-frames 1` and apply
+the same settings to preprocessing. Shorter dwell is more sensitive to noise.
+Use `--gripper-event-mode bands` to compare the earlier threshold detector.
+The original and Vesta entrypoints retain their existing detector defaults.
+
+```bash
+.venv/bin/python scripts/inspect_gripper_stages.py --episode 0 \
+  --gripper-min-change-frac 0.25
+```
 
 The grounded preprocessing entrypoint reads state/actions/task text directly
 from the episode table. For the shared query bank and clustering it decodes only wrist tail
@@ -574,3 +701,51 @@ so numeric padding masks are validated by their dtype, rather than the substring
 `Shape of quantile 'min' ... (1,)`. The vendored LeRobot checkout is unchanged.
 After the earlier crash in `save_episode`, use a fresh output destination:
 metadata may already have been partly written before the aggregation exception.
+
+### Heatmap confidence gaps and gripper recovery
+
+Grounded preprocessing interpolates only bounded TAPIR visibility gaps: up to
+0.5 seconds for POV and 2 seconds for sparse third-person tracks. Missing camera
+frames and leading/trailing invisible spans remain unmarked. Set
+`--pov-visibility-gap-seconds 0 --third-person-visibility-gap-seconds 0` to disable.
+Tracking sidecars retain `raw_visibility` alongside the repaired visibility.
+
+The gripper fallback uses only the exact subtask endpoint: either a visible
+tracked gripper point there, or a fresh Molmo grounding on that same frame.
+If the endpoint is missing or unresolved, the overlay is omitted. Points from
+other frames are not substituted because the gripper may have moved.
+
+### POV continuity across subtasks
+
+By default each stage renders its own selected POV points together with points
+from the immediately preceding stage. Previous points are seeded at their actual
+visible endpoint and TAPIR tracks them forward through the next stage. Current
+points still use tail clustering and full-stage backward tracking. No older
+stages accumulate, and third-person goals are unaffected.
+
+The `pov.previous_stage` sidecar records carried trajectories, visibility, and
+failures. This adds a forward tracking pass for stages after the first, so it
+can increase preprocessing time. `--no-pov-track-previous-stage` disables it.
+Occluded or unresolved points can still disappear; carryover does not invent
+positions or force visibility.
+
+### Batched TAPIR preprocessing
+
+The grounded entrypoint defaults to `--tapir-frame-batch-size 16`. This is
+temporal chunking: ordered frames share one GPU upload, feature-extraction call,
+and trajectory-estimation call, with causal state carried into the next chunk.
+Outputs are copied back to CPU once per chunk. Tail candidates, selected-point
+backtracking, previous-stage carryover, and third-person tracking all use it.
+Short final chunks are processed without padding or dropping frames. Existing
+callers of `BootsTAPIR` keep a one-frame default unless configured otherwise.
+
+```bash
+SO101_TAPIR_FRAME_BATCH_SIZE=16 \
+SO101_DST_REPO=kdaterao/so101_grounded_batched_test_v1 \
+bash scripts/preprocess_so101_grounded.sh
+```
+
+Compare the same episode with `SO101_TAPIR_FRAME_BATCH_SIZE=1`. Smaller chunks
+use less VRAM; try 8 if 16 runs out of memory. Batching does not change source
+FPS or remove tracking passes. Tracking consistency, GPU memory, and throughput
+still need measurement on the GPU VM; no speedup factor is assumed.
