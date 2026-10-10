@@ -245,10 +245,14 @@ bank of TAPIR appearance features from multiple frames across the demos, then
 tracks those exact descriptors in every demo. Equal candidate IDs therefore
 refer to the same source descriptors across demos. Seeds come from each stage's
 final `--cluster-tail-frames` frames (default 30), with
-`--query-frames-per-stage 5`. Candidate tracking stays within these windows.
+`--query-frames-per-stage 5`. Candidate tracking also includes the first 10
+frames of the following subtask by default (`--pov-next-stage-frames`); set it
+to `0` to disable that extension. The next-subtask frames inform point
+selection, while output tracks are cropped to the original subtask.
 RoboTAP motion clustering, static-motion filtering, cluster voting, and
 cross-demo endpoint funneling select the shared stage points; selected endpoints
-are then tracked backward through each full stage. Extra stages are selected
+are then tracked backward through each full stage from the extended window's
+endpoint. Extra stages are selected
 per episode when episode stage counts differ. `point_tracks/pov_query_bank.json`
 records the source episode, frame, and pixel coordinate of each shared query.
 

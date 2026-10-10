@@ -53,7 +53,9 @@ SO101_HF_DOWNLOAD_WORKERS=64 python -m robot101.data.preprocess \
 ```
 
 Each episode is split at gripper events. Wrist candidates are clustered from
-stage-tail frames and tracked through their stages. Molmo2 grounds task objects
+stage-tail frames plus the first 10 frames of the following stage by default,
+then tracked backward and saved over the original stage. Set
+`--pov-next-stage-frames 0` to disable that overlap. Molmo2 grounds task objects
 and uses the gripper to associate them in available third-person views. The
 gripper is not used as a fallback goal label: unresolved stages are marked for
 human correction. TAPIR tracks selected points and the pipeline saves clean

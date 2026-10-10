@@ -40,7 +40,7 @@ python scripts/profile_preprocessing.py -- \
     --molmo-batch-size 4 --molmo-dtype bf16 \
     --device cuda --video-backend pyav \
     --tapir-frame-batch-size 256 --third-person-tracking-fps 1 \
-    --cluster-tail-frames 30 \
+    --cluster-tail-frames 30 --pov-next-stage-frames 10 \
     --tapnet-checkpoint tapnet/checkpoints/causal_bootstapir_checkpoint.pt \
     --push-to-hub
 ```
@@ -48,6 +48,12 @@ python scripts/profile_preprocessing.py -- \
 The example uses the batch size from recent A6000 runs. The Python default is
 256; reduce the argument if GPU memory runs out. Download workers control file
 fetching independently of TAPIR frame batching and Molmo prompt batching.
+
+POV clustering uses each subtask's final 30 wrist frames plus the first 10 frames
+of the following subtask by default. The extra opening frames help retain points
+through gripper-triggered boundaries; selected tracks are still written over
+their original subtask. Adjust `--pov-next-stage-frames` or set it to `0` to
+disable this overlap. The final subtask has no following window.
 
 - Change `--episodes` to `0-9` or `0,3,8`; the Python default is one episode, `0`.
 - Episode shards are fetched on demand. If metadata is cached but a selected episode's data shard is missing, preprocessing syncs that episode's data and camera files from the Hub and retries.

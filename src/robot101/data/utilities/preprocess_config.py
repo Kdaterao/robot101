@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gripper-vel-min", type=float, default=0.05)
     p.add_argument("--gripper-smooth-window", type=int, default=5)
     p.add_argument("--cluster-tail-frames", type=int, default=30)
+    p.add_argument("--pov-next-stage-frames", type=int, default=10,
+                   help="Include this many frames from the next subtask's beginning in POV clustering")
     p.add_argument("--num-sample-points", type=int, default=128, help="Shared query budget across episodes/stages/source frames; at least 8 per source frame")
     p.add_argument("--query-frames-per-stage", type=int, default=5, help="Spread feature seeds across each wrist tail, as in tapnetCreate.py")
     p.add_argument("--num-poi-points", type=int, default=16)

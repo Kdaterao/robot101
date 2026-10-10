@@ -168,14 +168,31 @@ def _draw_points(frame_rgb: np.ndarray, points: np.ndarray, label: str) -> np.nd
 
 
 def _tail_query_frames(stages: list[Stage], tail_frames: int, query_frames: int,
-                       goal_tail_frames: int, masks: np.ndarray) -> list[int]:
-    """Choose distinct, real seed frames inside each stage's clustering window."""
+                       goal_tail_frames: int, masks: np.ndarray,
+                       next_stage_frames: int = 0) -> list[int]:
+    """Choose real seed frames across each stage tail and next-stage opening."""
     indices = set()
-    for stage in stages:
+    for stage_index, stage in enumerate(stages):
         lo = max(stage.start, stage.end - tail_frames + 1)
-        hi = max(lo, stage.end - goal_tail_frames // 2)
+        window_end = stage.end
+        if stage_index + 1 < len(stages) and next_stage_frames > 0:
+            next_stage = stages[stage_index + 1]
+            window_end = max(window_end, next_stage.start + next_stage_frames - 1)
+        window_end = min(window_end, len(masks) - 1)
+        hi = max(lo, window_end - goal_tail_frames // 2)
         indices.update(int(round(f)) for f in np.linspace(lo, hi, query_frames))
     return sorted(i for i in indices if masks[i])
+
+
+def _stage_cluster_bounds(stages: list[Stage], stage_index: int, num_frames: int,
+                          tail_frames: int, next_stage_frames: int) -> tuple[int, int]:
+    """Return the stage tail start and its optional next-stage opening end."""
+    stage = stages[stage_index]
+    start = max(stage.start, stage.end - tail_frames + 1)
+    end = stage.end
+    if stage_index + 1 < len(stages) and next_stage_frames > 0:
+        end = max(end, stages[stage_index + 1].start + next_stage_frames - 1)
+    return start, min(end, num_frames - 1)
 
 
 def _stage_cache_entry(
@@ -186,12 +203,14 @@ def _stage_cache_entry(
     shared_features,
     num_queries: int,
     tail_frames: int,
+    window_end: int,
     label: str,
 ) -> dict:
     length = min(max(1, int(tail_frames)), stage.end - stage.start + 1)
     tail_start = stage.end - length + 1
-    clip = frames[tail_start : stage.end + 1]
-    real = masks[tail_start : stage.end + 1]
+    window_end = max(stage.end, min(int(window_end), len(frames) - 1))
+    clip = frames[tail_start : window_end + 1]
+    real = masks[tail_start : window_end + 1]
     if len(clip) < 1 or not bool(real.any()):
         return {
             "tracks": np.zeros((num_queries, max(1, len(clip)), 2), dtype=np.float32),
@@ -563,6 +582,8 @@ def main() -> None:
         raise SystemExit("Query frame and sample point counts must be positive")
     if args.cluster_tail_frames < 1:
         raise SystemExit("--cluster-tail-frames must be positive")
+    if args.pov_next_stage_frames < 0:
+        raise SystemExit("--pov-next-stage-frames must be nonnegative")
     if args.tapir_frame_batch_size < 1:
         raise SystemExit("--tapir-frame-batch-size must be positive")
     if args.decode_batch_size < 1:
@@ -691,8 +712,11 @@ def main() -> None:
                 stages = stages[: args.max_stages]
                 stages[-1] = Stage(stages[-1].start, data["n"] - 1, "none")
             tail_indices = {0}
-            for stage in stages:
-                tail_indices.update(range(max(stage.start, stage.end - args.cluster_tail_frames + 1), stage.end + 1))
+            for si, stage in enumerate(stages):
+                window_start, window_end = _stage_cluster_bounds(
+                    stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
+                )
+                tail_indices.update(range(window_start, window_end + 1))
             decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
                                    batch_size=args.decode_batch_size, backend=args.video_backend)
             validate_episode_shapes(data, src_meta.features, [CAMERA_WRIST])
@@ -709,7 +733,7 @@ def main() -> None:
             # seed's descriptors once. They retain the same identity in all demos.
             query_frames = _tail_query_frames(stages, args.cluster_tail_frames,
                                              args.query_frames_per_stage, args.goal_tail_frames,
-                                             data["masks"][CAMERA_WRIST])
+                                             data["masks"][CAMERA_WRIST], args.pov_next_stage_frames)
             n_per = max(8, args.num_sample_points // max(1, len(episode_ids) * len(stages) * args.query_frames_per_stage))
             for index in query_frames:
                 xy = sample_query_points(w, h, n_per, rng=query_rng)
@@ -739,6 +763,7 @@ def main() -> None:
         "source_episode_frame": query_sources.tolist(),
         "source_points_xy": query_source_xy.tolist(),
         "tail_frames": args.cluster_tail_frames,
+        "next_stage_frames": args.pov_next_stage_frames,
         "query_frames_per_stage": args.query_frames_per_stage,
     }) + "\n", encoding="utf-8")
     print(f"Shared wrist feature bank: {num_queries} queries; same descriptors in every episode", flush=True)
@@ -755,15 +780,22 @@ def main() -> None:
             data = load_episode_metadata(source, cameras)
             stages = stage_lists[epi]
             tail_indices = {0}
-            for stage in stages:
-                tail_indices.update(range(max(stage.start, stage.end - args.cluster_tail_frames + 1), stage.end + 1))
+            for si, stage in enumerate(stages):
+                window_start, window_end = _stage_cluster_bounds(
+                    stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
+                )
+                tail_indices.update(range(window_start, window_end + 1))
             decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
                                    batch_size=args.decode_batch_size, backend=args.video_backend)
             episode_cache = []
             for si, stage in enumerate(stages):
+                _, window_end = _stage_cluster_bounds(
+                    stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
+                )
                 entry = _stage_cache_entry(
                     tapir, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST], stage,
-                    shared_features, num_queries, args.cluster_tail_frames, f"ep{ep_idx}/stage{si}/tail")
+                    shared_features, num_queries, args.cluster_tail_frames, window_end,
+                    f"ep{ep_idx}/stage{si}/tail")
                 entry["height"], entry["width"] = data["frames"][CAMERA_WRIST][0].shape[:2]
                 episode_cache.append(entry)
             tail_cache.append(episode_cache)
@@ -838,30 +870,44 @@ def main() -> None:
             cache = tail_cache[epi][si]
             ids = selected_ids.get((epi, si), np.zeros(0, dtype=np.int64))
             pov_failure = None
+            cluster_window_start, cluster_window_end = _stage_cluster_bounds(
+                stages, si, n, args.cluster_tail_frames, args.pov_next_stage_frames
+            )
+            wrist_mask = data["masks"][CAMERA_WRIST]
+            valid_endpoints = np.flatnonzero(wrist_mask[st.start : cluster_window_end + 1])
+            pov_seed_frame = (
+                st.start + int(valid_endpoints[-1]) if len(valid_endpoints) else st.end
+            )
             if len(ids):
                 tail_tr = cache["tracks"][ids]
                 tail_vi = cache["visible"][ids]
                 end_points = track_tail_endpoint(tail_tr, tail_vi, n_tail=args.goal_tail_frames)
-                full_clip = wrist_frames[st.start : st.end + 1]
-                back_tracks = np.zeros((len(end_points), len(full_clip), 2), dtype=np.float32)
-                back_vis = np.zeros((len(end_points), len(full_clip)), dtype=bool)
-                raw_back_vis = back_vis.copy()
-                if len(full_clip) and bool(data["masks"][CAMERA_WRIST][st.end]):
+                full_clip = wrist_frames[st.start : pov_seed_frame + 1]
+                full_masks = wrist_mask[st.start : pov_seed_frame + 1]
+                full_back_tracks = np.zeros((len(end_points), len(full_clip), 2), dtype=np.float32)
+                full_back_vis = np.zeros((len(end_points), len(full_clip)), dtype=bool)
+                full_raw_back_vis = full_back_vis.copy()
+                if len(full_clip) and pov_seed_frame >= st.end and bool(wrist_mask[pov_seed_frame]):
                     try:
-                        back_tracks, back_vis = tapir.track_segment_backward(
+                        full_back_tracks, full_back_vis = tapir.track_segment_backward(
                             full_clip, end_points, label=f"ep{ep_idx}/stage{si}/pov-back"
                         )
-                        back_vis[:, ~data["masks"][CAMERA_WRIST][st.start : st.end + 1]] = False
-                        raw_back_vis = back_vis.copy()
-                        back_tracks, back_vis = _bridge_visibility_gaps(
-                            back_tracks, back_vis, data["masks"][CAMERA_WRIST][st.start : st.end + 1],
+                        full_back_vis[:, ~full_masks] = False
+                        full_raw_back_vis = full_back_vis.copy()
+                        full_back_tracks, full_back_vis = _bridge_visibility_gaps(
+                            full_back_tracks, full_back_vis, full_masks,
                             round(fps * args.pov_visibility_gap_seconds),
                         )
                         print(f"  wrist backtracking finished in {perf_counter()-stage_started:.1f}s", flush=True)
                     except Exception as exc:
                         pov_failure = f"pov_tracking_failed:{exc}"
                 else:
-                    pov_failure = "missing_wrist_end_frame"
+                    pov_failure = "missing_wrist_cluster_endpoint"
+                stage_length = st.end - st.start + 1
+                stage_slice = slice(0, min(stage_length, full_back_tracks.shape[1]))
+                back_tracks = full_back_tracks[:, stage_slice]
+                back_vis = full_back_vis[:, stage_slice]
+                raw_back_vis = full_raw_back_vis[:, stage_slice]
                 count = min(args.num_poi_points, len(end_points))
                 length = min(back_tracks.shape[1], st.end - st.start + 1)
                 wrist_tracks[st.start : st.start + length, :count] = np.transpose(back_tracks[:count, :length], (1, 0, 2))
@@ -920,7 +966,12 @@ def main() -> None:
                     except Exception as exc:
                         previous_record.update(status="failed", reason=f"previous_pov_tracking_failed:{exc}")
                         print(f"  POV carryover failed: {exc}", flush=True)
-            previous_pov = (st.end, back_tracks[:, -1].copy(), back_vis[:, -1].copy())
+            stage_end_offset = st.end - st.start
+            previous_pov = (
+                st.end,
+                back_tracks[:, stage_end_offset].copy() if back_tracks.shape[1] > stage_end_offset else np.zeros((len(back_tracks), 2), np.float32),
+                back_vis[:, stage_end_offset].copy() if back_vis.shape[1] > stage_end_offset else np.zeros(len(back_vis), bool),
+            )
 
             third = {}
             for cam in CAMERAS_3P:
@@ -989,6 +1040,8 @@ def main() -> None:
                     "active_points_end": end_points.tolist(),
                     "query_ids": ids.tolist(),
                     "query_sources_episode_frame": query_sources[ids].tolist(),
+                    "cluster_window": [int(cluster_window_start), int(cluster_window_end)],
+                    "seed_frame": int(pov_seed_frame),
                     "tracks": back_tracks.tolist(), "visibility": back_vis.tolist(),
                     "raw_visibility": raw_back_vis.tolist(),
                     "visibility_gap_seconds": args.pov_visibility_gap_seconds,
@@ -1008,7 +1061,7 @@ def main() -> None:
             if args.viz_dir:
                 viz_dir = args.viz_dir / f"ep{ep_idx:06d}"
                 viz_dir.mkdir(parents=True, exist_ok=True)
-                t = st.end
+                t = pov_seed_frame
                 cv2.imwrite(
                     str(viz_dir / f"stage{si:02d}_pov_end.jpg"),
                     points_heatmap(cv2.cvtColor(wrist_frames[t], cv2.COLOR_RGB2BGR), end_points, np.ones(len(end_points), bool), args.heatmap_sigma, args.heatmap_alpha),
