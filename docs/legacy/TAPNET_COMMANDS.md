@@ -570,28 +570,31 @@ frames and leading/trailing invisible spans remain unmarked. Set
 `--pov-visibility-gap-seconds 0 --third-person-visibility-gap-seconds 0` to disable.
 Tracking sidecars retain `raw_visibility` alongside the repaired visibility.
 
-The gripper fallback uses only the exact subtask endpoint: either a visible
-tracked gripper point there, or a fresh Molmo grounding on that same frame.
-If the endpoint is missing or unresolved, the overlay is omitted. Points from
-other frames are not substituted because the gripper may have moved.
+Current grounded preprocessing does not use the gripper as a goal fallback.
+Unresolved third-person stages are omitted from the goal overlay and can be
+fixed with `scripts/fix_grounded_points.py`.
 
 ### POV continuity across subtasks
 
 By default each stage renders its own selected POV points together with points
 from the immediately preceding stage. Previous points are seeded at their actual
-visible endpoint and TAPIR tracks them forward through the next stage. Current
+visible endpoint and TAPIR tracks them forward for 1.5 seconds into the next
+stage. The same short carryover is applied to third-person points. Current POV
 points still use tail clustering and full-stage backward tracking. No older
-stages accumulate, and third-person goals are unaffected.
+stages accumulate.
 
 The `pov.previous_stage` sidecar records carried trajectories, visibility, and
-failures. This adds a forward tracking pass for stages after the first, so it
-can increase preprocessing time. `--no-pov-track-previous-stage` disables it.
+failures. Third-person carryover is recorded under each camera's
+`transition_from_previous` field. Set `--transition-persist-seconds` to adjust
+the duration or to `0` to disable all carryover. This adds a forward tracking
+pass per camera after the first stage, so it can increase preprocessing time.
+`--no-pov-track-previous-stage` disables POV carryover.
 Occluded or unresolved points can still disappear; carryover does not invent
 positions or force visibility.
 
 ### Batched TAPIR preprocessing
 
-The grounded entrypoint defaults to `--tapir-frame-batch-size 16`. This is
+The grounded entrypoint defaults to `--tapir-frame-batch-size 256`. This is
 temporal chunking: ordered frames share one GPU upload, feature-extraction call,
 and trajectory-estimation call, with causal state carried into the next chunk.
 Outputs are copied back to CPU once per chunk. Tail candidates, selected-point

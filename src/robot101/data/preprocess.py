@@ -378,10 +378,9 @@ def _ground_and_track_camera(
     label: str,
     fps: float = 30.0,
     tracking_fps: float = 1.0,
-    episode_gripper_cache: dict | None = None,
     visibility_gap_seconds: float = 2.0,
 ) -> dict:
-    """Associate sparse semantic tracks; otherwise freeze an endpoint gripper snapshot."""
+    """Associate sparse semantic tracks; leave unresolved cases for manual labeling."""
     clip = frames[stage.start : stage.end + 1]
     if not clip:
         return {"status": "failed", "reason": "empty_stage", "tracks": [], "visibility": []}
@@ -390,49 +389,24 @@ def _ground_and_track_camera(
     failures: list[str] = []
     sample_indices = None
     h, w = clip[0].shape[:2]
-    episode_gripper_cache = {} if episode_gripper_cache is None else episode_gripper_cache
-
-    def fallback(reason, tracked_points=None, tracked_vis=None):
-        """Freeze gripper coordinates, never the moving gripper trajectory."""
+    def unresolved(reason):
+        """Return no fabricated goal points and flag the camera stage for review."""
         failures.append(reason)
-        snapshot = len(clip) - 1 if len(clip) and stage_masks[-1] else None
-        snapshot_source = "subtask_end"
-        points = np.zeros((0, 2), np.float32)
-        if snapshot is not None and tracked_points is not None:
-            points = _valid_points({"points_xy": tracked_points[tracked_vis[:, snapshot], snapshot]}, w, h)
-        if snapshot is not None and not len(points):
-            try:
-                print(f"  Molmo {label}: fallback gripper snapshot at stage-end frame {stage.end}", flush=True)
-                raw = molmo.ground(clip[snapshot], f"Point to the {GRIPPER_QUERY}.")
-                points = _valid_points(raw, w, h)
-                groundings["fallback_gripper_snapshot"] = {
-                    "frame": stage.end, "points_xy": points.tolist(),
-                    "raw_response": str(raw.get("raw_response", "")),
-                }
-            except Exception as exc:
-                failures.append(f"fallback_gripper_grounding_failed:{exc}")
-        # Coordinates from any other time can represent a different goal.
-        # Leave this stage unresolved if its exact endpoint has no valid point.
-        tracks = np.repeat(points[:, None, :], len(clip), axis=1)
-        visible = np.repeat(stage_masks[None, :], len(points), axis=0)
         return {
-            "status": "ok" if len(points) else "failed", "reason": reason if len(points) else "fallback_gripper_unresolved",
-            "failures": sorted(set(failures)), "source": "gripper_fallback" if len(points) else "none",
-            "fallback_mode": "static_snapshot", "snapshot_frame": stage.start + snapshot if len(points) else None,
-            "snapshot_source": snapshot_source if len(points) else None,
+            "status": "failed", "reason": reason,
+            "failures": sorted(set(failures)), "source": "none",
             "entity": None, "distance_to_gripper": None, "image_size": [w, h],
-            "initial_points": points.tolist(),
-            "initial_points_norm": (points / np.array([max(1, w - 1), max(1, h - 1)])).tolist(),
-            "tracks": tracks.tolist(), "visibility": visible.tolist(),
-            "tracks_normalized": (tracks / np.array([max(1, w - 1), max(1, h - 1)])).tolist(),
+            "initial_points": [], "initial_points_norm": [],
+            "tracks": [], "visibility": [], "tracks_normalized": [],
             "groundings": groundings, "tracking_fps": tracking_fps,
+            "manual_review_required": True,
         }
 
     start_real = bool(masks[stage.start])
     if not start_real:
-        return fallback("missing_start_frame")
+        return unresolved("missing_start_frame")
     if not bool(masks[stage.end]):
-        return fallback("missing_end_frame")
+        return unresolved("missing_end_frame")
     frame = clip[0]
     point_parts: list[np.ndarray] = []
     ranges: dict[str, tuple[int, int]] = {}
@@ -477,9 +451,9 @@ def _ground_and_track_camera(
             failures.append(f"{entity}_grounding_failed")
 
     if GRIPPER_QUERY not in ranges:
-        return fallback("gripper_grounding_failed")
+        return unresolved("gripper_grounding_failed")
     if len(ranges) == 1:
-        return fallback("no_semantic_object_grounded")
+        return unresolved("no_semantic_object_grounded")
 
     all_points = np.concatenate(point_parts, axis=0).astype(np.float32)
     tracking_started = perf_counter()
@@ -491,13 +465,13 @@ def _ground_and_track_camera(
         print(f"  TAPIR {label}: {len(sample_indices)}/{len(clip)} frames at {tracking_fps:g} FPS / "
               f"{len(all_points)} points in {perf_counter()-tracking_started:.1f}s", flush=True)
     except Exception as exc:
-        return fallback(f"candidate_tracking_failed:{exc}")
+        return unresolved(f"candidate_tracking_failed:{exc}")
     end_points, reaches_end = _last_endpoint(candidates, candidate_vis)
     gi0, gi1 = ranges[GRIPPER_QUERY]
     gripper_ids = np.arange(gi0, gi1)
     live_gripper = gripper_ids[reaches_end[gripper_ids]]
     if not len(live_gripper):
-        return fallback("tracker_lost_gripper", candidates[gripper_ids], candidate_vis[gripper_ids])
+        return unresolved("tracker_lost_gripper")
 
     def norm(p):
         return np.asarray(p, dtype=np.float32) / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
@@ -519,12 +493,12 @@ def _ground_and_track_camera(
     close = [x for x in semantic_distances if x[0] <= threshold]
     ambiguous = len(close) > 1 and (close[1][0] - close[0][0]) <= ambiguity_margin
     if ambiguous:
-        return fallback("ambiguous_object_match", candidates[gripper_ids], candidate_vis[gripper_ids])
+        return unresolved("ambiguous_object_match")
     elif close:
         distance, entity, chosen_ids = close[0]
         source, status, reason = "semantic_object", "ok", None
     else:
-        return fallback("no_semantic_object_near_gripper", candidates[gripper_ids], candidate_vis[gripper_ids])
+        return unresolved("no_semantic_object_near_gripper")
 
     initial_points = all_points[chosen_ids]
     # Each query has an independent causal state. Reuse the chosen trajectories
@@ -823,7 +797,6 @@ def main() -> None:
         previous_pov = None
         wrist_frames = data["frames"][CAMERA_WRIST]
         episode_records = []
-        episode_gripper_caches = {cam: {} for cam in CAMERAS_3P}
         previous_camera_points = {cam: None for cam in CAMERAS_3P}
         transition_frames = int(round(fps * args.transition_persist_seconds))
         task = _task_text(data["tasks"])
@@ -939,7 +912,6 @@ def main() -> None:
                     tapir, molmo, data["frames"][cam], data["masks"][cam], st,
                     entities, args.object_proximity_threshold, args.ambiguity_margin,
                     f"ep{ep_idx}/stage{si}/{cam}", fps=fps, tracking_fps=args.third_person_tracking_fps,
-                    episode_gripper_cache=episode_gripper_caches[cam],
                     visibility_gap_seconds=args.third_person_visibility_gap_seconds,
                 )
                 transition = {

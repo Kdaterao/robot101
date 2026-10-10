@@ -38,7 +38,7 @@ These settings control different parts of the run:
 
 - `--molmo-batch-size 4` batches image-and-prompt requests for Molmo on the GPU.
 - `--tapir-frame-batch-size 256` batches ordered frames per TAPIR call. The
-  default is 16; raise it while GPU memory allows.
+  default is 256; lower it if GPU memory runs out.
 - `--decode-batch-size 64` controls video frames decoded together and uses CPU
   memory.
 - `SO101_HF_DOWNLOAD_WORKERS=64` controls parallel Hugging Face file downloads;
@@ -54,8 +54,27 @@ SO101_HF_DOWNLOAD_WORKERS=64 python -m robot101.data.preprocess \
 
 Each episode is split at gripper events. Wrist candidates are clustered from
 stage-tail frames and tracked through their stages. Molmo2 grounds task objects
-and the gripper in available third-person views; TAPIR tracks those points and
-the pipeline saves clean camera videos, point reports, and robot state/action
-data. Point coordinates and visibility are in `point_tracks/`; use `--viz-dir`
-to save separate overlay images for review. Invalid episode shapes are recorded
-as skipped episodes.
+and uses the gripper to associate them in available third-person views. The
+gripper is not used as a fallback goal label: unresolved stages are marked for
+human correction. TAPIR tracks selected points and the pipeline saves clean
+camera videos, point reports, and robot state/action data. Point coordinates
+and visibility are in `point_tracks/`; use `--viz-dir` to save separate overlay
+images for review. Invalid episode shapes are recorded as skipped episodes.
+
+## Manually correct third-person points
+
+Open unresolved stages, click the goal object in the top or side camera, and
+let TAPIR track the clicks through that subtask:
+
+```bash
+python scripts/fix_grounded_points.py \
+  --repo-id YOUR_USER/grounded-dataset \
+  --episodes 105 --push-to-hub
+```
+
+The script opens one source episode by default. Use `--episodes 105-120:5` to
+select a stepped range, `--max-episodes 3` to open up to three episodes when no
+range is given, or `--review-all` to replace existing model tracks too. Left
+click adds a point, right click or Backspace removes the last click, `a`/`d`
+steps through valid frames, Enter tracks and saves, `n` skips, and `q` quits.
+Corrections are written to the episode sidecar; `--push-to-hub` uploads them.

@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--heatmap-sigma", type=float, default=40.0)
     p.add_argument("--heatmap-alpha", type=float, default=0.55)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--tapir-frame-batch-size", type=int, default=16,
+    p.add_argument("--tapir-frame-batch-size", type=int, default=256,
                    help="Ordered frames per causal TAPIR call; 1 restores per-frame tracking")
     p.add_argument("--tapir-tf32", action="store_true", help="Allow faster TF32 FP32 operations on Ampere GPUs; may slightly change tracks")
     p.add_argument("--decode-batch-size", type=int, default=64, help="Frames per video seek; increase with available CPU RAM")

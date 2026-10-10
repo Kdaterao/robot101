@@ -46,7 +46,7 @@ python scripts/profile_preprocessing.py -- \
 ```
 
 The example uses the batch size from recent A6000 runs. The Python default is
-16; reduce the argument if GPU memory runs out. Download workers control file
+256; reduce the argument if GPU memory runs out. Download workers control file
 fetching independently of TAPIR frame batching and Molmo prompt batching.
 
 - Change `--episodes` to `0-9` or `0,3,8`; the Python default is one episode, `0`.
@@ -71,8 +71,9 @@ stage points carried forward for continuity. Molmo2 grounds task entities and
 the gripper in third-person images; third-person tracking uses the configured
 FPS. Dataset videos keep the original clean camera frames, while tracked
 coordinates and visibility are saved in point reports. `--viz-dir` writes
-separate overlay images for review. Endpoint gripper recovery uses the exact
-stage-end image. Unresolved goals are recorded in stage reports.
+separate overlay images for review. The gripper helps associate the object
+goal, but is never written as a fallback goal point. Unresolved third-person
+stages are flagged for manual correction.
 
 The LeRobot dataset contains clean camera videos and state/action data, with
 point tracks in `point_tracks/`.
