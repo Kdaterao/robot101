@@ -16,43 +16,41 @@ A video demonstration of this robot can be found on my linkedin(https://lnkd.in/
 - Notable libraries: lerobot (robot + dataset abstractions), pygame (input/display), OpenCV, Hugging Face Hub utilities
 
 
-## Source code
+## Files of interest (quick)
+- src/train.py
+  - Offline training loop. Uses LeRobotDataset and SmolVLAPolicy. Default dataset and model repo strings are defined inside (see code comments).
+  - Looks for local checkpoint in outputs/train/smolvla_desk; otherwise loads from hub repo (kdaterao/smolVLA_desk2 in the current script).
+- src/inference.py
+  - Live inference + robot loop. Builds an inference frame from robot sensors, runs the SmolVLA model, postprocesses to robot action, and sends the action to the robot.
+  - Example robot port and camera indices are inside; model defaults to `lerobot/smolvla_base`.
+- src/utility.py
+  - Contains FPS, REST_POSE, NEUTRAL_POS, camera preview helpers, joint-print helpers, go_to_rest, ease_to_position, and a small pygame prompt helper.
+- src/SO101/*
+  - URDF and MuJoCo files for the SO101 robot. Two calibration variants are provided: new_calib (virtual zero = middle of range) and old_calib (virtual zero = fully-extended horizontal). scene.xml uses one by default.
 
-See [src/README.md](src/README.md) for the source layout and each section's role.
 
-- `src/robot101/data/`: episode preprocessing, segmentation, point labeling and uploads.
-- `src/robot101/perception/`: Molmo2 connector inference, TAPIR tracking and clustering.
-- `src/robot101/robot/`: controllers, recording, teleoperation and shared robot helpers.
-- `src/robot101/policies/`: SmolVLA training and physical robot inference.
-- `src/robot101/calibration/`: camera preparation and geometry utilities.
-- `src/robot101/legacy/`: older pipelines and experiments.
-- `scripts/`: setup, profiling, dataset viewers and upstream training adapters.
-- `requirements.txt`: dependency profiles; `pyproject.toml`: package metadata.
+## What’s in this repo (top-level)
+- pyproject.toml / requirements.txt — project metadata & pinned dependency list
+- packages.sh — helper for installing system-level packages
+- src/ — Python source and main scripts
+  - train.py — offline training script (SmolVLA + LeRobot dataset)
+  - inference.py — live inference loop for running a policy on the real robot
+  - teleoperate.py — teleoperation utilities (Xbox controller / UI)
+  - record.py — dataset recording utilities
+  - utility.py — camera helpers, joint/pose constants, GUI helpers, motion easing, and safety helpers (go_to_rest, ease_to_position, etc.)
+  - controllers.py, resetDB.py, testDB.py, iphoneTest.py, xboxController.py, SO101LeaderController.py — supporting controllers & tests
+- src/SO101/ — robot description & simulation files (URDF / MJCF)
+  - robot.urdf, so101_new_calib.urdf, so101_old_calib.urdf, so101_new_calib.xml, so101_old_calib.xml, scene.xml, joints_properties.xml, assets/...
+- README.md (this file) and a small notes.md / thundercompute.md used during development
 
-## Setup and run guides
 
-- [All workflows](docs/README.md): package installers and run guide index.
-- [Episode preprocessing](docs/preprocessing.md): Ubuntu/A6000 setup, clustering, Molmo2 inference, telemetry and dataset upload.
-- [Molmo2 training](docs/molmo2_training.md): prepare point labels, tune the connector and upload weights.
-- [Local viewers](docs/viewing.md): inspect episodes, subtasks and point labels.
+## Quickstart — install & run
 
-Package installation scripts live in `scripts/setup/`. Python commands for
-processing and training are documented separately in `docs/`.
+1) Python / environment
+- Python 3.12 (pyproject: requires-python >=3.12,<3.14)
+- Recommended: create a virtualenv
 
-For the robot control environment on Ubuntu:
-
+2) Install dependencies
 ```bash
-bash scripts/setup/linux_setup.sh --profile robot
-source .venv/bin/activate
-hf auth login
-```
-
-Run the offline SmolVLA training entrypoint after configuring its dataset and
-output settings:
-
-```bash
-python -m robot101.policies.train
-```
-
-See the source files above for robot ports, camera IDs and policy configuration
-before running live inference or recording.
+python -m pip install -r requirements.txt
+# or use your preferred environment tool (poetry/uv/venv)
