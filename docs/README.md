@@ -20,6 +20,7 @@ Short workflow guides:
 
 - [Molmo gripper point dataset](molmo_gripper_point_data.md)
 - [Grounded robot training data](grounded_training_data.md)
+- [SAM 2 contact-guided point filtering and TAPNext migration](sam2_contact_point_filtering.md)
 
 There are two setup entrypoints: `linux_setup.sh` for Ubuntu and
 `windows_setup.ps1` for native Windows PowerShell. Linux defaults to preprocessing;
