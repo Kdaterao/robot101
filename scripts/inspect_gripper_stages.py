@@ -14,20 +14,10 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "tapnet"))
-# Accept both the VM's pinned TapNet and the newer local checkout spelling.
-try:
-    import tapnet.torch
-except ModuleNotFoundError as exc:
-    if exc.name != "tapnet.torch":
-        raise
-    import tapnet.tapir_torch
-    sys.modules["tapnet.torch"] = tapnet.tapir_torch
-
-from grounded_episode_io import load_episode_metadata
-from hf_preprocess_smolvla import GRIPPER_INDEX, _load_lerobot
-from hf_preprocess_smolvla_grounded import build_parser
-from robotap import Stage, events_from_gripper_thresholds, stages_from_events
+from robot101.data.utilities.episode_io import load_episode_metadata
+from robot101.data.utilities.episode_helpers import GRIPPER_INDEX, _load_lerobot
+from robot101.data.utilities.preprocess_config import build_parser
+from robot101.data.utilities.stages import Stage, events_from_gripper_thresholds, stages_from_events
 
 
 def parser():

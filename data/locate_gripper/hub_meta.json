@@ -5,8 +5,6 @@
   "files": [
     "images/**",
     "labels.jsonl",
-    "README.md",
-    "locate_sft.jsonl",
-    "recipe.json"
+    "README.md"
   ]
 }

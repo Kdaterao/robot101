@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=71"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "robot-101"
 version = "0.1.0"
@@ -12,3 +16,11 @@ python-preference = "only-managed"
 
 [tool.uv.sources]
 lerobot = { path = "lerobot", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["robot101*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+robot101 = ["legacy/simulation/assets/so101/**/*", "calibration/*.md"]
