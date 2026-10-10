@@ -57,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--goal-tail-frames", type=int, default=5)
     p.add_argument("--pov-track-previous-stage", action=argparse.BooleanOptionalAction, default=True,
                    help="Continue the preceding stage's POV points forward alongside current-stage points")
+    p.add_argument("--transition-persist-seconds", type=float, default=1.5,
+                   help="Track preceding-subtask points into the next subtask for this long; 0 disables carryover")
     p.add_argument("--pov-visibility-gap-seconds", type=float, default=0.5, help="Bridge short bounded TAPIR confidence gaps; 0 disables")
     p.add_argument("--third-person-visibility-gap-seconds", type=float, default=2.0, help="Bridge bounded confidence gaps after sparse tracking; 0 disables")
     p.add_argument("--heatmap-sigma", type=float, default=40.0)
@@ -70,4 +72,3 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--viz-dir", type=Path, default=None)
     p.add_argument("--sidecar-dir", type=Path, default=None)
     return p
-

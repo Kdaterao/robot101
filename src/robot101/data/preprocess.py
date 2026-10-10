@@ -73,6 +73,33 @@ def _task_text(tasks: list[str]) -> str:
     return Counter(nonempty).most_common(1)[0][0] if nonempty else ""
 
 
+def _load_source_episode(LeRobotDataset, repo_id: str, ep_idx: int, root: Path, video_backend: str):
+    """Load one episode, syncing its referenced shards when the local cache is partial.
+
+    LeRobot can have valid episode metadata locally while the parquet shard for
+    that episode is absent. In that state, filtering the cached parquet raises
+    ``Instruction 'train' corresponds to no data!`` before its normal missing
+    file check can download the episode. Retry once with a forced metadata sync;
+    LeRobot then downloads only the selected episode's data and video files.
+    """
+    kwargs = {
+        "episodes": [ep_idx],
+        "root": root,
+        "video_backend": video_backend,
+    }
+    try:
+        return LeRobotDataset(repo_id, **kwargs)
+    except ValueError as exc:
+        if "corresponds to no data" not in str(exc):
+            raise
+        print(
+            f"  Episode {ep_idx} is missing from the local parquet cache; "
+            "syncing its data and camera shards from the Hub...",
+            flush=True,
+        )
+        return LeRobotDataset(repo_id, force_cache_sync=True, **kwargs)
+
+
 def _extract_noun_phrases(task: str, nlp, max_objects: int) -> list[str]:
     """Extract deduplicated, task-relevant noun chunks using spaCy."""
     if not task.strip():
@@ -263,6 +290,60 @@ def _expand_sparse_tracks(tracks, visible, indices, masks):
         full_visible[i] &= np.isfinite(tracks[i, previous]).all(axis=1)
     full_visible[:, ~np.asarray(masks, bool)] = False
     return full, full_visible
+
+
+def _track_transition_points(
+    tapir: BootsTAPIR,
+    frames: list[np.ndarray],
+    masks: np.ndarray,
+    seed_frame: int,
+    next_stage_start: int,
+    persist_frames: int,
+    points: np.ndarray,
+    *,
+    fps: float,
+    tracking_fps: float | None,
+    visibility_gap_seconds: float,
+    label: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Track previous-subtask endpoints into the next subtask's opening window."""
+    points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    end_frame = min(len(frames) - 1, next_stage_start + persist_frames - 1)
+    length = max(0, end_frame - next_stage_start + 1)
+    empty_tracks = np.zeros((0, length, 2), dtype=np.float32)
+    empty_vis = np.zeros((0, length), dtype=bool)
+    if (
+        not len(points) or length == 0 or seed_frame < 0 or seed_frame > next_stage_start
+        or not masks[seed_frame]
+    ):
+        return empty_tracks, empty_vis, points[:0], empty_vis.copy()
+    points = points[np.isfinite(points).all(axis=1)]
+    if not len(points):
+        return empty_tracks, empty_vis, points, empty_vis.copy()
+
+    clip = frames[seed_frame : end_frame + 1]
+    clip_masks = np.asarray(masks[seed_frame : end_frame + 1], dtype=bool)
+    if tracking_fps is None:
+        sample_indices = np.flatnonzero(clip_masks)
+    else:
+        sample_indices = _third_person_sample_indices(len(clip), fps, tracking_fps, clip_masks)
+    if len(sample_indices) == 0 or sample_indices[0] != 0:
+        return empty_tracks, empty_vis, points[:0], empty_vis.copy()
+
+    sparse_tracks, sparse_vis, _, _ = tapir.track_video(
+        [clip[i] for i in sample_indices], points, query_frame_index=0
+    )
+    full_tracks, full_vis = _expand_sparse_tracks(sparse_tracks, sparse_vis, sample_indices, clip_masks)
+    offset = next_stage_start - seed_frame
+    full_tracks = full_tracks[:, offset : offset + length]
+    full_vis = full_vis[:, offset : offset + length]
+    full_vis[:, ~np.asarray(masks[next_stage_start : end_frame + 1], dtype=bool)] = False
+    raw_vis = full_vis.copy()
+    full_tracks, full_vis = _bridge_visibility_gaps(
+        full_tracks, full_vis, masks[next_stage_start : end_frame + 1],
+        round(fps * visibility_gap_seconds),
+    )
+    return full_tracks, full_vis, points, raw_vis
 
 
 def _bridge_visibility_gaps(tracks, visible, masks, max_gap_frames):
@@ -500,6 +581,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if any(not np.isfinite(v) or v < 0 for v in (args.pov_visibility_gap_seconds, args.third_person_visibility_gap_seconds)):
         raise SystemExit("Visibility gap seconds must be finite and nonnegative")
+    if not np.isfinite(args.transition_persist_seconds) or args.transition_persist_seconds < 0:
+        raise SystemExit("--transition-persist-seconds must be finite and nonnegative")
     if args.molmo_batch_size < 1:
         raise SystemExit("--molmo-batch-size must be positive")
     if args.query_frames_per_stage < 1 or args.num_sample_points < 1:
@@ -557,7 +640,9 @@ def main() -> None:
 
     if args.dry_run:
         for ep_idx in episode_ids:
-            source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
+            source = _load_source_episode(
+                LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+            )
             try:
                 data = load_episode_metadata(source, cameras)
                 validate_episode_shapes(data, src_meta.features, cameras)
@@ -613,7 +698,9 @@ def main() -> None:
     shared_resolution = None
     for epi, ep_idx in enumerate(episode_ids):
         print(f"[query bank] episode {ep_idx} ({epi + 1}/{len(episode_ids)})", flush=True)
-        source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
+        source = _load_source_episode(
+            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+        )
         data = None
         try:
             data = load_episode_metadata(source, cameras)
@@ -684,7 +771,9 @@ def main() -> None:
 
     # Track this exact feature bank through each stage tail in every demo.
     for epi, ep_idx in enumerate(eligible_episode_ids):
-        source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
+        source = _load_source_episode(
+            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+        )
         data = load_episode_metadata(source, cameras)
         stages = stage_lists[epi]
         tail_indices = {0}
@@ -712,7 +801,9 @@ def main() -> None:
             print(f"[ep {ep_idx}] already written, skip", flush=True)
             continue
         print(f"\n=== Grounded preprocessing episode {ep_idx} ===", flush=True)
-        source = LeRobotDataset(args.src_repo_id, episodes=[ep_idx], root=src_root, video_backend=args.video_backend)
+        source = _load_source_episode(
+            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+        )
         episode_started = perf_counter()
         data = None
         try:
@@ -733,6 +824,8 @@ def main() -> None:
         wrist_frames = data["frames"][CAMERA_WRIST]
         episode_records = []
         episode_gripper_caches = {cam: {} for cam in CAMERAS_3P}
+        previous_camera_points = {cam: None for cam in CAMERAS_3P}
+        transition_frames = int(round(fps * args.transition_persist_seconds))
         task = _task_text(data["tasks"])
         try:
             nouns = _extract_noun_phrases(task, nlp, args.max_task_objects)
@@ -797,19 +890,25 @@ def main() -> None:
                 "status": "disabled" if not args.pov_track_previous_stage else "unavailable",
                 "tracks": [], "visibility": [], "raw_visibility": [],
             }
-            if args.pov_track_previous_stage and previous_pov is not None:
+            if args.pov_track_previous_stage and transition_frames > 0 and previous_pov is not None:
                 seed_frame, seed_tracks, seed_vis = previous_pov
                 seeds = seed_tracks[seed_vis & np.isfinite(seed_tracks).all(axis=1)][:args.num_poi_points]
                 if len(seeds) and data["masks"][CAMERA_WRIST][seed_frame]:
                     try:
-                        print(f"  POV stage {si}: continuing {len(seeds)} previous-stage points", flush=True)
+                        carry_length = min(st.end - st.start + 1, transition_frames)
+                        carry_end = st.start + carry_length - 1
+                        print(
+                            f"  POV stage {si}: continuing {len(seeds)} previous-stage points "
+                            f"for {carry_length / fps:.2f}s",
+                            flush=True,
+                        )
                         carry_tracks, carry_vis, _, _ = tapir.track_video(
-                            wrist_frames[seed_frame:st.end + 1], seeds, query_frame_index=0,
+                            wrist_frames[seed_frame:carry_end + 1], seeds, query_frame_index=0,
                         )
                         offset = st.start - seed_frame
-                        carry_tracks = carry_tracks[:, offset:]
-                        carry_vis = carry_vis[:, offset:]
-                        stage_masks = data["masks"][CAMERA_WRIST][st.start:st.end + 1]
+                        carry_tracks = carry_tracks[:, offset:offset + carry_length]
+                        carry_vis = carry_vis[:, offset:offset + carry_length]
+                        stage_masks = data["masks"][CAMERA_WRIST][st.start:carry_end + 1]
                         carry_vis[:, ~stage_masks] = False
                         raw_carry_vis = carry_vis.copy()
                         carry_tracks, carry_vis = _bridge_visibility_gaps(
@@ -818,12 +917,14 @@ def main() -> None:
                         )
                         count = len(seeds)
                         slots = slice(args.num_poi_points, args.num_poi_points + count)
-                        wrist_tracks[st.start:st.end + 1, slots] = carry_tracks.transpose(1, 0, 2)
-                        wrist_vis[st.start:st.end + 1, slots] = carry_vis.T
+                        wrist_tracks[st.start:carry_end + 1, slots] = carry_tracks.transpose(1, 0, 2)
+                        wrist_vis[st.start:carry_end + 1, slots] = carry_vis.T
                         previous_record.update(
                             status="ok", seed_frame=seed_frame, seed_points=seeds.tolist(),
                             tracks=carry_tracks.tolist(), visibility=carry_vis.tolist(),
                             raw_visibility=raw_carry_vis.tolist(),
+                            persist_seconds=args.transition_persist_seconds,
+                            persist_frames=carry_length,
                         )
                     except Exception as exc:
                         previous_record.update(status="failed", reason=f"previous_pov_tracking_failed:{exc}")
@@ -841,6 +942,41 @@ def main() -> None:
                     episode_gripper_cache=episode_gripper_caches[cam],
                     visibility_gap_seconds=args.third_person_visibility_gap_seconds,
                 )
+                transition = {
+                    "source_subtask": si - 1 if si else None,
+                    "status": "disabled" if transition_frames == 0 else "unavailable",
+                    "tracks": [], "visibility": [], "raw_visibility": [],
+                }
+                prior = previous_camera_points[cam]
+                if transition_frames > 0 and prior is not None:
+                    try:
+                        carry_tracks, carry_vis, carry_points, raw_carry_vis = _track_transition_points(
+                            tapir, data["frames"][cam], data["masks"][cam],
+                            prior["frame"], st.start, transition_frames, prior["points"],
+                            fps=fps, tracking_fps=args.third_person_tracking_fps,
+                            visibility_gap_seconds=args.third_person_visibility_gap_seconds,
+                            label=f"ep{ep_idx}/stage{si}/{cam}/transition",
+                        )
+                        transition.update(
+                            status="ok" if bool(carry_vis.any()) else "tracker_lost",
+                            seed_points=carry_points.tolist(), tracks=carry_tracks.tolist(),
+                            visibility=carry_vis.tolist(), raw_visibility=raw_carry_vis.tolist(),
+                            persist_seconds=args.transition_persist_seconds,
+                            persist_frames=int(carry_tracks.shape[1]),
+                        )
+                    except Exception as exc:
+                        transition.update(status="failed", reason=f"transition_tracking_failed:{exc}")
+                result["transition_from_previous"] = transition
+                result_tracks = np.asarray(result.get("tracks", []), dtype=np.float32)
+                result_vis = np.asarray(result.get("visibility", []), dtype=bool)
+                if result_tracks.ndim == 3 and result_tracks.shape[1] and result_vis.shape == result_tracks.shape[:2]:
+                    valid = result_vis[:, -1] & np.isfinite(result_tracks[:, -1]).all(axis=1)
+                    previous_camera_points[cam] = {
+                        "frame": st.end,
+                        "points": result_tracks[valid, -1].copy(),
+                    }
+                else:
+                    previous_camera_points[cam] = None
                 if noun_failure:
                     result["failures"] = sorted(set(result.get("failures", []) + [noun_failure]))
                     if not result.get("tracks"):
@@ -906,7 +1042,9 @@ def main() -> None:
         sidecar_root.mkdir(parents=True, exist_ok=True)
         sidecar = sidecar_root / f"ep{ep_idx:06d}.json"
         sidecar.write_text(json.dumps({"episode": ep_idx, "destination_episode": int(dst.meta.total_episodes),
-                                      "task": task, "entities": entities, "subtasks": episode_records}, indent=2) + "\n", encoding="utf-8")
+                                      "task": task, "entities": entities,
+                                      "heatmap": {"sigma": args.heatmap_sigma, "alpha": args.heatmap_alpha},
+                                      "subtasks": episode_records}, indent=2) + "\n", encoding="utf-8")
 
         # Keep dataset videos clean. Tracked coordinates and visibility are in
         # the episode sidecar; --viz-dir can render separate review images.

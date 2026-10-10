@@ -50,6 +50,8 @@ The example uses the batch size from recent A6000 runs. The Python default is
 fetching independently of TAPIR frame batching and Molmo prompt batching.
 
 - Change `--episodes` to `0-9` or `0,3,8`; the Python default is one episode, `0`.
+- Episode shards are fetched on demand. If metadata is cached but a selected episode's data shard is missing, preprocessing syncs that episode's data and camera files from the Hub and retries.
+- Points from the previous subtask are TAPIR-tracked into the next subtask for 1.5 seconds by default, for both wrist and third-person views. Set `--transition-persist-seconds` to adjust the overlap or `0` to disable it.
 - Change `--dst-repo-id` to your output dataset. Choose a fresh destination for a new experiment; use `--resume` to continue a compatible existing destination.
 - Remove `--push-to-hub` to keep the dataset local. Upload happens only when episodes are written.
 - Replace `--molmo-connector-repo` with `--molmo-connector /absolute/path/so101_connector.pt` for local weights.

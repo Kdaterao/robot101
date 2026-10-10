@@ -21,7 +21,9 @@ python scripts/view_grounded_subtasks.py \
 Change `--repo-id` to select another dataset. By default, the viewer loads at
 most three episodes. Use `--random-episodes 5` for five random episodes.
 Add `--recompute-stages` to preview current gripper segmentation without
-rewriting saved data. Source datasets also support this viewer.
+rewriting saved data. On grounded datasets, point heatmaps are drawn over the
+clean videos from the `point_tracks/` sidecars. Source datasets also support
+this viewer and show no point overlay unless tracking sidecars are present.
 
 ## View prepared gripper labels
 

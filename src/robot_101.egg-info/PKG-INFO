@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: robot-101
+Version: 0.1.0
+Requires-Python: <3.14,>=3.12
+Requires-Dist: lerobot[dataset,feetech,placo-dep,smolvla]
+Requires-Dist: pygame>=2.6
