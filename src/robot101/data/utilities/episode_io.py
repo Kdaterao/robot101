@@ -90,7 +90,7 @@ def decode_episode_cameras(ds, data, cameras, *, indices=None, batch_size=64, ba
     Unrequested slots are None for sparse decoding; callers may only access the
     requested tail windows. Full decoding returns the original list layout.
     """
-    from lerobot.datasets.video_utils import decode_video_frames
+    from lerobot.datasets.video_utils import decode_video_frames, FrameTimestampError
     if batch_size < 1:
         raise ValueError('decode batch size must be positive')
     requested = list(range(data['n'])) if indices is None else sorted(set(indices))
@@ -115,8 +115,16 @@ def decode_episode_cameras(ds, data, cameras, *, indices=None, batch_size=64, ba
             offset = float(ds.meta.episodes[episode][f'videos/{key}/from_timestamp'])
             for batch in _frame_batches(requested, batch_size):
                 timestamps = [offset + data['timestamps'][i] for i in batch]
-                decoded = decode_video_frames(
-                    path, timestamps, ds.tolerance_s, backend=backend, return_uint8=True)
+                try:
+                    decoded = decode_video_frames(
+                        path, timestamps, ds.tolerance_s, backend=backend, return_uint8=True)
+                except FrameTimestampError as exc:
+                    # A metadata/video offset mismatch makes this episode
+                    # unusable for tracking. Surface it through the same
+                    # episode-level skip path as invalid image shapes.
+                    raise EpisodeShapeError(
+                        f'{key} video timestamp mismatch: {exc}'
+                    ) from exc
                 # Copies release the entire batch tensor when it goes out of scope.
                 for i, image in zip(batch, decoded, strict=True):
                     frames[i] = image.permute(1, 2, 0).cpu().numpy().copy()

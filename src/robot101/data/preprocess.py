@@ -744,27 +744,45 @@ def main() -> None:
     print(f"Shared wrist feature bank: {num_queries} queries; same descriptors in every episode", flush=True)
 
     # Track this exact feature bank through each stage tail in every demo.
+    cache_episode_ids = []
+    cache_stage_lists = []
     for epi, ep_idx in enumerate(eligible_episode_ids):
         source = _load_source_episode(
             LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
         )
-        data = load_episode_metadata(source, cameras)
-        stages = stage_lists[epi]
-        tail_indices = {0}
-        for stage in stages:
-            tail_indices.update(range(max(stage.start, stage.end - args.cluster_tail_frames + 1), stage.end + 1))
-        decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
-                               batch_size=args.decode_batch_size, backend=args.video_backend)
-        episode_cache = []
-        for si, stage in enumerate(stages):
-            entry = _stage_cache_entry(
-                tapir, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST], stage,
-                shared_features, num_queries, args.cluster_tail_frames, f"ep{ep_idx}/stage{si}/tail")
-            entry["height"], entry["width"] = data["frames"][CAMERA_WRIST][0].shape[:2]
-            episode_cache.append(entry)
-        tail_cache.append(episode_cache)
-        del data, source
+        data = None
+        try:
+            data = load_episode_metadata(source, cameras)
+            stages = stage_lists[epi]
+            tail_indices = {0}
+            for stage in stages:
+                tail_indices.update(range(max(stage.start, stage.end - args.cluster_tail_frames + 1), stage.end + 1))
+            decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
+                                   batch_size=args.decode_batch_size, backend=args.video_backend)
+            episode_cache = []
+            for si, stage in enumerate(stages):
+                entry = _stage_cache_entry(
+                    tapir, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST], stage,
+                    shared_features, num_queries, args.cluster_tail_frames, f"ep{ep_idx}/stage{si}/tail")
+                entry["height"], entry["width"] = data["frames"][CAMERA_WRIST][0].shape[:2]
+                episode_cache.append(entry)
+            tail_cache.append(episode_cache)
+            cache_episode_ids.append(ep_idx)
+            cache_stage_lists.append(stages)
+        except EpisodeShapeError as exc:
+            record_skipped_episode(skip_path, ep_idx, "tail_cache", exc)
+        finally:
+            del data, source
+    # Keep all per-episode structures aligned if an episode fails a second
+    # decode while building its candidate cache.
+    eligible_episode_ids = cache_episode_ids
+    stage_lists = cache_stage_lists
     del shared_features
+
+    if not eligible_episode_ids or not tail_cache:
+        print(f"No valid wrist tail caches; see {skip_path}", flush=True)
+        dst.finalize()
+        return
 
     selected_ids, n_aligned = _select_pov_points(tail_cache, stage_lists, args, tapir.device)
     print(f"POV cross-demo alignment: {n_aligned} shared stage indices")
