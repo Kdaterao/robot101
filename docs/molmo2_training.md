@@ -27,6 +27,13 @@ splits. Omit `--push-to-hub` for local preparation; add `--public` when creating
 a public dataset (private by default). Robot video processing has its own
 [guide](preprocessing.md).
 
+Downloads use one worker and automatically retry HTTP 429 rate limits with
+increasing waits. Rerun the same command after an interruption: keep
+`--cache-dir` unchanged so completed files are reused. Configure concurrency
+with `--download-workers 4`, or retry limits with `--download-attempts 15`
+and `--download-retry-wait 35` (seconds). More workers do not increase the
+Hub request quota.
+
 ## Install the adapter and download the training checkpoint
 
 ```bash

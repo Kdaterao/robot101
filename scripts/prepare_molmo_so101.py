@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from robot101.data.utilities.hub_downloads import guarded_snapshot_download
 
 
 def _parse_args() -> argparse.Namespace:
@@ -18,6 +20,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--download-workers", type=int, default=1,
+                        help="Parallel Hub file downloads (default: %(default)s)")
+    parser.add_argument("--download-attempts", type=int, default=15,
+                        help="Maximum download attempts on HTTP 429 (default: %(default)s)")
+    parser.add_argument("--download-retry-wait", type=float, default=35.0,
+                        help="Base 429 wait in seconds; increases each retry (default: %(default)s)")
     parser.add_argument(
         "--push-to-hub",
         action="store_true",
@@ -42,7 +50,10 @@ def main() -> None:
         raise SystemExit("--validation-fraction must be in [0, 1)")
 
     local_repo = Path(
-        snapshot_download(
+        guarded_snapshot_download(
+            max_workers=args.download_workers,
+            retries=args.download_attempts,
+            base_wait_s=args.download_retry_wait,
             repo_id=args.repo_id,
             repo_type="dataset",
             local_dir=args.cache_dir,

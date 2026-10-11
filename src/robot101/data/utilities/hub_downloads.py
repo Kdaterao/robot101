@@ -84,6 +84,24 @@ def _wrap_snapshot_download(orig, *, max_workers: int, retries: int, base_wait_s
     return wrapped
 
 
+def guarded_snapshot_download(
+    *, max_workers: int = 1, retries: int = 15, base_wait_s: float = 35.0, **kwargs: Any
+):
+    """Download a snapshot with cache-preserving retries, without global patches.
+
+    ``retries`` is the maximum number of attempts, including the first call.
+    """
+    if max_workers < 1 or retries < 1 or base_wait_s <= 0:
+        raise ValueError("Download workers, attempts, and retry wait must be positive")
+    prepare_hf_hub_env()
+    from huggingface_hub._snapshot_download import snapshot_download
+
+    return _wrap_snapshot_download(
+        snapshot_download, max_workers=max_workers, retries=retries,
+        base_wait_s=base_wait_s,
+    )(**kwargs)
+
+
 def install_hf_download_guards(
     *,
     max_workers: int = 1,
