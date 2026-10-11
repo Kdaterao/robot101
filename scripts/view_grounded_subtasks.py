@@ -190,9 +190,9 @@ class Viewer:
             for record in report["subtasks"]:
                 summary = {k: record[k] for k in ("subtask", "start_frame", "end_frame", "primitive")}
                 summary["pov"] = {k: v for k, v in record.get("pov", {}).items()
-                                  if k in {"source", "status", "reason"}}
+                                  if k in {"source", "status", "reason", "gripper_filter", "manual_review_required"}}
                 summary["third_person"] = {cam: {k: v for k, v in value.items() if k in
-                    {"source", "status", "reason", "entity", "fallback_mode", "snapshot_frame", "snapshot_source", "tracking_fps"}}
+                    {"source", "status", "reason", "entity", "fallback_mode", "snapshot_frame", "snapshot_source", "tracking_fps", "seed_frame", "tracking_direction", "manual_review_required"}}
                     for cam, value in record.get("third_person", {}).items()}
                 stages.append(summary)
             if self.recomputed:

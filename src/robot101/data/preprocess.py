@@ -3,10 +3,10 @@
 POV uses tapnetCreate.py's shared appearance-feature bank and motion clustering.
 Query descriptors sampled from multiple stage-tail frames keep the same identity
 across demonstrations. Points are selected from their stage-tail tracks and
-then tracked backward through each full stage. Third-person points are grounded
-from task noun phrases plus the gripper, associated at the stage endpoint, and
-tracked forward at a configurable sparse rate. Unresolved objects use a static
-endpoint gripper snapshot. Per-stage diagnostics are
+then tracked backward through each full stage. SAM 2 excludes the POV gripper
+and weights nearby candidates. Third-person candidates are grounded at the
+subtask start, tracked forward, and selected by endpoint gripper proximity.
+Unresolved goals can use an exact-end-frame gripper fallback tracked backward. Diagnostics are
 written beside the LeRobot output in ``point_tracks/``.
 """
 
@@ -40,6 +40,8 @@ from robot101.data.utilities.episode_helpers import (
     _save_progress,
 )
 from robot101.perception.molmo2 import Molmo2Worker
+from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT
+from robot101.data.utilities.gripper_filtering import prepare_gripper_filter
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
 from robot101.data.utilities.validation import (EpisodeShapeError, validate_episode_shapes,
@@ -248,8 +250,20 @@ def _select_pov_points(
         return selected, 0
 
     def select(entries: list[dict], label: str, seed: int) -> np.ndarray:
-        tracks = [entry["tracks"] for entry in entries]
-        vis = [entry["visible"] for entry in entries]
+        entries = [e for e in entries if not e.get("gripper_filter", {}).get("manual_review_required", False)]
+        if not entries:
+            return np.zeros(0, dtype=np.int64)
+        eligible = np.logical_and.reduce([e.get("eligible", np.ones(len(e["tracks"]), bool)) for e in entries])
+        mapping = np.flatnonzero(eligible)
+        if not len(mapping):
+            return mapping
+        tracks = [entry["tracks"][mapping] for entry in entries]
+        vis = [entry["visible"][mapping] for entry in entries]
+        point_weights = None
+        if "observation_weights" in entries[0]:
+            point_weights = np.mean([
+                e["observation_weights"][mapping].sum(1) / np.maximum(1, e["visible"][mapping].sum(1))
+                for e in entries], axis=0)
         h = int(entries[0].get("height", 480))
         w = int(entries[0].get("width", 640))
         result = select_stage_active(
@@ -265,14 +279,16 @@ def _select_pov_points(
             device=device,
             seed=seed,
             label=label,
+            point_weights=point_weights,
         )
-        return np.asarray(result["point_ids"], dtype=np.int64)
+        return mapping[np.asarray(result["point_ids"], dtype=np.int64)]
 
     for si in range(n_aligned):
         entries = [stage_cache[ei][si] for ei in range(len(stage_cache))]
         ids = select(entries, f"shared stage {si}", args.seed + si)
         for ei in range(len(stage_lists)):
-            selected[(ei, si)] = ids
+            selected[(ei, si)] = (np.zeros(0, dtype=np.int64)
+                                   if stage_cache[ei][si].get("gripper_filter", {}).get("manual_review_required") else ids)
 
     for ei, stages in enumerate(stage_lists):
         for si in range(n_aligned, len(stages)):
@@ -386,185 +402,137 @@ def _bridge_visibility_gaps(tracks, visible, masks, max_gap_frames):
 
 
 def _ground_and_track_camera(
-    tapir: BootsTAPIR,
-    molmo: MolmoPointWorker | Molmo2Worker,
-    frames: list[np.ndarray],
-    masks: np.ndarray,
-    stage: Stage,
-    entities: list[str],
-    threshold: float,
-    ambiguity_margin: float,
-    label: str,
-    fps: float = 30.0,
-    tracking_fps: float = 1.0,
-    visibility_gap_seconds: float = 2.0,
+    tapir, molmo, frames, masks, stage, entities, threshold, ambiguity_margin,
+    label, fps=30.0, tracking_fps=1.0, visibility_gap_seconds=2.0,
 ) -> dict:
-    """Associate sparse semantic tracks; leave unresolved cases for manual labeling."""
-    clip = frames[stage.start : stage.end + 1]
-    if not clip:
-        return {"status": "failed", "reason": "empty_stage", "tracks": [], "visibility": []}
-    stage_masks = np.asarray(masks[stage.start : stage.end + 1], dtype=bool)
-    groundings: dict[str, dict] = {}
-    failures: list[str] = []
-    sample_indices = None
-    h, w = clip[0].shape[:2]
+    """Discover candidates at the start; associate forward tracks at the end."""
+    clip = frames[stage.start:stage.end+1]
+    stage_masks = np.asarray(masks[stage.start:stage.end+1], bool)
+    groundings, failures = {}, []
+    h, w = clip[0].shape[:2] if clip else (0, 0)
+    scale = np.asarray([max(1, w-1), max(1, h-1)], np.float32)
+    base = dict(image_size=[w, h], groundings=groundings, failures=failures,
+                tracking_fps=tracking_fps, distance_to_gripper=None,
+                threshold=float(threshold), manual_review_required=False)
+
     def unresolved(reason):
-        """Return no fabricated goal points and flag the camera stage for review."""
-        failures.append(reason)
-        return {
-            "status": "failed", "reason": reason,
-            "failures": sorted(set(failures)), "source": "none",
-            "entity": None, "distance_to_gripper": None, "image_size": [w, h],
-            "initial_points": [], "initial_points_norm": [],
-            "tracks": [], "visibility": [], "tracks_normalized": [],
-            "groundings": groundings, "tracking_fps": tracking_fps,
-            "manual_review_required": True,
-        }
+        return {**base, "status": "failed", "reason": reason, "source": "none",
+                "entity": None, "tracks": [], "visibility": [], "raw_visibility": [],
+                "tracks_normalized": [], "initial_points": [], "initial_points_norm": [],
+                "manual_review_required": True}
 
-    start_real = bool(masks[stage.start])
-    if not start_real:
-        return unresolved("missing_start_frame")
-    if not bool(masks[stage.end]):
+    if not clip or not stage_masks[-1]:
         return unresolved("missing_end_frame")
-    frame = clip[0]
-    point_parts: list[np.ndarray] = []
-    ranges: dict[str, tuple[int, int]] = {}
-    batched_results = None
-    if hasattr(molmo, "ground_batch"):
-        started = perf_counter()
-        print(f"  Molmo {label}: grounding {len(entities)} independent requests", flush=True)
-        batched_results = molmo.ground_batch([(frame, f"Point to the {entity}.") for entity in entities])
-        if len(batched_results) != len(entities):
-            raise ValueError("Molmo grounding batch length mismatch")
-        print(f"    batched grounding finished in {perf_counter()-started:.1f}s", flush=True)
-    for entity_index, entity in enumerate(entities):
+    indices = _third_person_sample_indices(len(clip), fps, tracking_fps, stage_masks)
+
+    def ground(entity, frame_index, raw=None):
         prompt = f"Point to the {entity}."
-        started = perf_counter()
-        if batched_results is None:
-            print(f"  Molmo {label}: {entity}", flush=True)
         try:
-            result = batched_results[entity_index] if batched_results is not None else molmo.ground(frame, prompt)
+            result = raw if raw is not None else molmo.ground(frames[frame_index], prompt)
             if result.get("error"):
-                raise RuntimeError(result["error"])
-            if batched_results is None:
-                print(f"    grounding finished in {perf_counter()-started:.1f}s", flush=True)
-            raw_points = np.asarray(result.get("points_xy", []), dtype=np.float32).reshape(-1, 2)
+                raise ValueError(result["error"])
             points = _valid_points(result, w, h)
-            if len(points) < len(raw_points):
-                failures.append(f"invalid_coordinates:{entity}:{len(raw_points) - len(points)}")
-            groundings[entity] = {
-                "prompt": prompt,
-                "raw_response": str(result.get("raw_response", "")),
-                "raw_points_xy": _json_points(raw_points),
-                "points_xy": points.tolist(),
-                "points_xy_norm": (points / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)).tolist(),
-            }
-            if len(points):
-                lo = sum(len(part) for part in point_parts)
-                point_parts.append(points)
-                ranges[entity] = (lo, lo + len(points))
-            else:
-                failures.append(f"{entity}_grounding_failed")
-        except Exception as exc:  # record model failures per stage/camera
-            groundings[entity] = {"prompt": prompt, "raw_response": "", "points_xy": [], "error": str(exc)}
-            failures.append(f"{entity}_grounding_failed")
+            record = {"prompt": prompt, "frame_index": int(frame_index),
+                      "points_xy": points.tolist(), "raw_response": str(result.get("raw_response", ""))}
+        except Exception as exc:
+            failures.append(f"{entity}_grounding_failed:{exc}")
+            points = np.empty((0, 2), np.float32)
+            record = {"prompt": prompt, "frame_index": int(frame_index), "points_xy": [], "error": str(exc)}
+        # Keep the original start detection when an exact-endpoint retry is made.
+        key = entity if frame_index == stage.start else f"{entity}@endpoint"
+        groundings[key] = record
+        return points
 
-    if GRIPPER_QUERY not in ranges:
-        return unresolved("gripper_grounding_failed")
-    if len(ranges) == 1:
-        return unresolved("no_semantic_object_grounded")
+    def finish(tracks, visible, seed_points, source, entity, seed_frame, direction, distance=None):
+        raw_visible = visible.copy()
+        tracks, visible = _bridge_visibility_gaps(tracks, visible, stage_masks, round(fps*visibility_gap_seconds))
+        return {**base, "source": source, "entity": entity, "status": "ok", "reason": None,
+                "distance_to_gripper": distance, "seed_frame": int(seed_frame),
+                "tracking_direction": direction, "seed_points": seed_points.tolist(),
+                "initial_points": tracks[:, 0].tolist(), "initial_points_norm": (tracks[:, 0]/scale).tolist(),
+                "tracks": tracks.tolist(), "tracks_normalized": (tracks/scale).tolist(),
+                "visibility": visible.tolist(), "raw_visibility": raw_visible.tolist(),
+                "visibility_gap_seconds": visibility_gap_seconds,
+                "tracking_sample_frames": (indices+stage.start).tolist()}
 
-    all_points = np.concatenate(point_parts, axis=0).astype(np.float32)
-    tracking_started = perf_counter()
-    sample_indices = _third_person_sample_indices(len(clip), fps, tracking_fps, stage_masks)
+    endpoint_gripper = None
+
+    def fallback(reason):
+        failures.append(reason)
+        points = endpoint_gripper if endpoint_gripper is not None else ground(GRIPPER_QUERY, stage.end)
+        if not len(points):
+            return unresolved("endpoint_gripper_grounding_failed")
+        try:
+            tracks, visible, _, _ = tapir.track_video(
+                [clip[i] for i in indices[::-1]], points, query_frame_index=0)
+            tracks, visible = _expand_sparse_tracks(tracks[:, ::-1], visible[:, ::-1], indices, stage_masks)
+            keep = visible[:, -1] & np.isfinite(tracks[:, -1]).all(1)
+            if not keep.any():
+                return unresolved("tracker_lost_endpoint_gripper")
+            return finish(tracks[keep], visible[keep], points[keep], "gripper_fallback",
+                          GRIPPER_QUERY, stage.end, "backward")
+        except Exception as exc:
+            return unresolved(f"endpoint_tracking_failed:{exc}")
+
+    if not stage_masks[0]:
+        return fallback("missing_start_frame")
+    entities = list(dict.fromkeys([GRIPPER_QUERY, *entities]))
+    results = None
+    if hasattr(molmo, "ground_batch"):
+        try:
+            results = molmo.ground_batch([(clip[0], f"Point to the {e}.") for e in entities])
+            if len(results) != len(entities):
+                raise ValueError("Molmo grounding batch length mismatch")
+        except Exception as exc:
+            failures.append(f"candidate_batch_failed:{exc}")
+            results = None
+    parts, ranges = [], {}
+    for i, entity in enumerate(entities):
+        points = ground(entity, stage.start, results[i] if results is not None else None)
+        if len(points):
+            lo = sum(len(part) for part in parts)
+            ranges[entity] = (lo, lo+len(points))
+            parts.append(points)
+    if not any(e != GRIPPER_QUERY for e in ranges):
+        return fallback("no_semantic_object_grounded")
+    points = np.concatenate(parts)
     try:
-        candidates, candidate_vis, _, _ = tapir.track_video(
-            [clip[i] for i in sample_indices], all_points, query_frame_index=0)
-        candidates, candidate_vis = _expand_sparse_tracks(candidates, candidate_vis, sample_indices, stage_masks)
-        print(f"  TAPIR {label}: {len(sample_indices)}/{len(clip)} frames at {tracking_fps:g} FPS / "
-              f"{len(all_points)} points in {perf_counter()-tracking_started:.1f}s", flush=True)
+        tracks, visible, _, _ = tapir.track_video([clip[i] for i in indices], points, query_frame_index=0)
+        tracks, visible = _expand_sparse_tracks(tracks, visible, indices, stage_masks)
     except Exception as exc:
-        return unresolved(f"candidate_tracking_failed:{exc}")
-    end_points, reaches_end = _last_endpoint(candidates, candidate_vis)
-    gi0, gi1 = ranges[GRIPPER_QUERY]
-    gripper_ids = np.arange(gi0, gi1)
-    live_gripper = gripper_ids[reaches_end[gripper_ids]]
-    if not len(live_gripper):
-        return unresolved("tracker_lost_gripper")
-
-    def norm(p):
-        return np.asarray(p, dtype=np.float32) / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
-
-    semantic_distances: list[tuple[float, str, np.ndarray]] = []
-    for entity in entities:
-        if entity == GRIPPER_QUERY or entity not in ranges:
+        return fallback(f"candidate_tracking_failed:{exc}")
+    reaches_end = visible[:, -1] & np.isfinite(tracks[:, -1]).all(1)
+    if GRIPPER_QUERY in ranges:
+        lo, hi = ranges[GRIPPER_QUERY]
+        live = np.arange(lo, hi)[reaches_end[lo:hi]]
+        gripper_end = tracks[live, -1]
+    else:
+        gripper_end = np.empty((0, 2), np.float32)
+    if not len(gripper_end):
+        # Re-detect only at this exact endpoint for association or fallback.
+        endpoint_gripper = ground(GRIPPER_QUERY, stage.end)
+        gripper_end = endpoint_gripper
+    if not len(gripper_end):
+        return fallback("tracker_lost_gripper")
+    matches = []
+    for entity, (lo, hi) in ranges.items():
+        if entity == GRIPPER_QUERY:
             continue
-        o0, o1 = ranges[entity]
-        object_ids = np.arange(o0, o1)
-        object_ids = object_ids[reaches_end[object_ids]]
-        if not len(object_ids):
+        live = np.arange(lo, hi)[reaches_end[lo:hi]]
+        if not len(live):
             failures.append(f"tracker_lost_object:{entity}")
             continue
-        dmat = np.linalg.norm(norm(end_points[live_gripper])[:, None] - norm(end_points[object_ids])[None], axis=2)
-        semantic_distances.append((float(dmat.min()), entity, object_ids))
-
-    semantic_distances.sort(key=lambda item: item[0])
-    close = [x for x in semantic_distances if x[0] <= threshold]
-    ambiguous = len(close) > 1 and (close[1][0] - close[0][0]) <= ambiguity_margin
-    if ambiguous:
-        return unresolved("ambiguous_object_match")
-    elif close:
-        distance, entity, chosen_ids = close[0]
-        source, status, reason = "semantic_object", "ok", None
-    else:
-        return unresolved("no_semantic_object_near_gripper")
-
-    initial_points = all_points[chosen_ids]
-    # Each query has an independent causal state. Reuse the chosen trajectories
-    # from the candidate pass instead of tracking the same video again.
-    final_tracks = candidates[chosen_ids].copy()
-    final_vis = candidate_vis[chosen_ids].copy()
-    keep = final_vis[:, -1]
-    if bool(keep.any()) and not bool(keep.all()):
-        failures.append(f"tracker_lost_selected_points:{int((~keep).sum())}")
-    if not bool(keep.any()):
-        failures.append("tracker_lost_selected_goal")
-        status, reason = "failed", "tracker_lost_selected_goal"
-        final_tracks = np.zeros((0, len(clip), 2), dtype=np.float32)
-        final_vis = np.zeros((0, len(clip)), dtype=bool)
-        initial_points = np.zeros((0, 2), dtype=np.float32)
-    else:
-        final_tracks = final_tracks[keep]
-        final_vis = final_vis[keep]
-        initial_points = initial_points[keep]
-
-    raw_final_vis = final_vis.copy()
-    final_tracks, final_vis = _bridge_visibility_gaps(
-        final_tracks, final_vis, stage_masks, round(fps * visibility_gap_seconds)
-    )
-
-    return {
-        "status": status,
-        "reason": reason,
-        "failures": sorted(set(failures)),
-        "source": source,
-        "entity": entity,
-        "distance_to_gripper": distance,
-        "threshold": float(threshold),
-        "image_size": [int(w), int(h)],
-        "initial_points": initial_points.tolist(),
-        "initial_points_norm": (initial_points / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)).tolist(),
-        "tracks": final_tracks.tolist(),
-        "tracks_normalized": (
-            final_tracks / np.array([max(1, w - 1), max(1, h - 1)], dtype=np.float32)
-        ).tolist(),
-        "visibility": final_vis.tolist(),
-        "raw_visibility": raw_final_vis.tolist(),
-        "visibility_gap_seconds": visibility_gap_seconds,
-        "groundings": groundings,
-        "tracking_fps": tracking_fps,
-        "tracking_sample_frames": (sample_indices + stage.start).tolist(),
-    }
+        distance = np.linalg.norm(gripper_end[:, None]/scale - tracks[live, -1][None]/scale, axis=2).min()
+        matches.append((float(distance), entity, live))
+    matches.sort(key=lambda item: item[0])
+    close = [m for m in matches if m[0] <= threshold]
+    if not close:
+        return fallback("no_semantic_object_near_gripper")
+    if len(close) > 1 and close[1][0]-close[0][0] <= ambiguity_margin:
+        return fallback("ambiguous_object_match")
+    distance, entity, chosen = close[0]
+    return finish(tracks[chosen], visible[chosen], points[chosen], "semantic_object",
+                  entity, stage.start, "forward", distance)
 
 
 from robot101.data.utilities.preprocess_config import build_parser
@@ -681,6 +649,14 @@ def main() -> None:
         from robot101.legacy.molmo_point import MolmoPointWorker
         molmo = MolmoPointWorker(args.molmo_model, device=args.device, dtype=args.molmo_dtype)
 
+    if (not np.isfinite(args.gripper_proximity_weight) or args.gripper_proximity_weight < 1
+            or not np.isfinite(args.gripper_proximity_radius) or args.gripper_proximity_radius <= 0):
+        raise SystemExit("Gripper weight must be >=1 and radius fraction >0")
+    sam = GripperMaskWorker(args.sam2_model, device=args.device) if args.pov_gripper_filter else None
+    corrections = json.loads(args.sam2_corrections.read_text()) if args.sam2_corrections else {}
+    if not isinstance(corrections, dict):
+        raise SystemExit("SAM corrections must be a JSON object keyed by episode:subtask")
+
     # Build one shared appearance-feature bank, as in tapnetCreate.py.
     # Candidate tracking remains restricted to stage tails.
     stage_lists: list[list[Stage]] = []
@@ -788,6 +764,25 @@ def main() -> None:
             decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
                                    batch_size=args.decode_batch_size, backend=args.video_backend)
             episode_cache = []
+            body_results = {}
+            if sam is not None and hasattr(molmo, "ground_batch"):
+                requests, request_stages = [], []
+                for si, stage in enumerate(stages):
+                    if f"{ep_idx}:{si}" in corrections:
+                        continue
+                    lo, hi = _stage_cluster_bounds(stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames)
+                    real = np.flatnonzero(data["masks"][CAMERA_WRIST][lo:hi+1])
+                    if len(real):
+                        requests.append((data["frames"][CAMERA_WRIST][lo+int(real[0])], BODY_PROMPT))
+                        request_stages.append(si)
+                if requests:
+                    try:
+                        results = molmo.ground_batch(requests)
+                        if len(results) != len(requests):
+                            raise ValueError("Body-prompt batch length mismatch")
+                        body_results = dict(zip(request_stages, results))
+                    except Exception as exc:
+                        body_results = {si: {"error": str(exc)} for si in request_stages}
             for si, stage in enumerate(stages):
                 _, window_end = _stage_cluster_bounds(
                     stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
@@ -797,6 +792,12 @@ def main() -> None:
                     shared_features, num_queries, args.cluster_tail_frames, window_end,
                     f"ep{ep_idx}/stage{si}/tail")
                 entry["height"], entry["width"] = data["frames"][CAMERA_WRIST][0].shape[:2]
+                if sam is not None:
+                    prepare_gripper_filter(
+                        entry, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST],
+                        molmo, sam, bank_root, ep_idx, si, corrections,
+                        args.gripper_proximity_weight, args.gripper_proximity_radius, args.goal_tail_frames,
+                        prompt_result=body_results.get(si))
                 episode_cache.append(entry)
             tail_cache.append(episode_cache)
             cache_episode_ids.append(ep_idx)
@@ -881,7 +882,8 @@ def main() -> None:
             if len(ids):
                 tail_tr = cache["tracks"][ids]
                 tail_vi = cache["visible"][ids]
-                end_points = track_tail_endpoint(tail_tr, tail_vi, n_tail=args.goal_tail_frames)
+                end_points = (cache["endpoints"][ids] if "endpoints" in cache else
+                              track_tail_endpoint(tail_tr, tail_vi, n_tail=args.goal_tail_frames))
                 full_clip = wrist_frames[st.start : pov_seed_frame + 1]
                 full_masks = wrist_mask[st.start : pov_seed_frame + 1]
                 full_back_tracks = np.zeros((len(end_points), len(full_clip), 2), dtype=np.float32)
@@ -917,7 +919,7 @@ def main() -> None:
                 back_tracks = np.zeros((0, st.end - st.start + 1, 2), dtype=np.float32)
                 back_vis = np.zeros((0, st.end - st.start + 1), dtype=bool)
                 raw_back_vis = back_vis.copy()
-                pov_failure = "no_active_points_selected"
+                pov_failure = cache.get("gripper_filter", {}).get("reason", "no_active_points_selected")
 
             # Continue only the immediately preceding stage's current points.
             # Seed on their actual endpoint frame, then track forward; never
@@ -1035,6 +1037,8 @@ def main() -> None:
                 "primitive": st.primitive,
                 "pov": {
                     "source": "cross_demo_tail_cluster" if si < n_aligned else "local_tail_cluster",
+                    "gripper_filter": cache.get("gripper_filter", {"status": "disabled"}),
+                    "manual_review_required": bool(pov_failure),
                     "status": "failed" if pov_failure else "ok",
                     "reason": pov_failure,
                     "active_points_end": end_points.tolist(),
@@ -1131,7 +1135,7 @@ def main() -> None:
                     path_in_repo="point_tracks",
                     repo_id=args.dst_repo_id,
                     repo_type="dataset",
-                    allow_patterns=["*.json"],
+                    allow_patterns=["*.json", "gripper_masks/*.npz", "gripper_masks/*.jpg", "mask_review/*.json", "mask_review/*.png"],
                     commit_message="Upload per-subtask point tracks and grounding diagnostics",
                 )
     print("Done.")

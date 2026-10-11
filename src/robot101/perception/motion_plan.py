@@ -114,6 +114,7 @@ def select_stage_active(
     device=None,
     seed: int = 42,
     label: str = "",
+    point_weights: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Pick active points for one stage.
 
@@ -174,7 +175,10 @@ def select_stage_active(
     k = int(min(n_clusters, N))
     labels = _kmeans_torch(feats, k, seed=seed, device=resolve_torch_device(device))
 
-    votes = np.array([int(np.sum(candidates & (labels == c))) for c in range(k)])
+    weights = np.ones(N) if point_weights is None else np.asarray(point_weights, dtype=float)
+    if weights.shape != (N,) or not np.isfinite(weights).all() or (weights <= 0).any():
+        raise ValueError("Point weights must be positive finite values, one per query")
+    votes = np.array([np.sum(weights[candidates & (labels == c)]) for c in range(k)])
     cl_motion = np.array(
         [float(med_motion[labels == c].mean()) if np.any(labels == c) else 0.0 for c in range(k)]
     )
@@ -203,9 +207,9 @@ def select_stage_active(
         cand_m = members[candidates[members]]
         rest = members[~candidates[members]]
         if len(cand_m) >= num_active:
-            point_ids = rng.choice(cand_m, size=num_active, replace=False)
+            point_ids = rng.choice(cand_m, size=num_active, replace=False, p=None if point_weights is None else weights[cand_m]/weights[cand_m].sum())
         else:
-            fill = rng.choice(rest, size=num_active - len(cand_m), replace=False)
+            fill = rng.choice(rest, size=num_active - len(cand_m), replace=False, p=None if point_weights is None else weights[rest]/weights[rest].sum())
             point_ids = np.concatenate([cand_m, fill])
     else:
         point_ids = members

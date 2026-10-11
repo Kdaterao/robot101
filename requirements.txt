@@ -34,6 +34,12 @@ einops>=0.7
 einshape>=1.0
 tqdm>=4.66
 typing_extensions>=4.8
+# Official Meta SAM 2 video predictor; upgrade this source deliberately.
+SAM-2 @ git+https://github.com/facebookresearch/sam2.git@main
+
+# [profile:molmo2]
+# Molmo2 uses legacy tuple annotations rejected by newer OmegaConf schemas.
+#| omegaconf==2.3.0
 
 # [profile:viewer]
 #| datasets>=3,<5

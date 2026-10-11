@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from robot101.data.utilities.hub_downloads import guarded_snapshot_download
+from robot101.data.utilities.point_labels import pixel_points
 
 
 def _parse_args() -> argparse.Namespace:
@@ -96,17 +97,9 @@ def main() -> None:
             try:
                 width = int(row["width"])
                 height = int(row["height"])
-                point = row.get("point_xy")
-                if point is None:
-                    norm = row["point_xy_norm"]
-                    x = float(norm[0]) * max(0, width - 1)
-                    y = float(norm[1]) * max(0, height - 1)
-                else:
-                    x, y = float(point[0]), float(point[1])
+                points = pixel_points(row, width, height)
             except (KeyError, TypeError, ValueError, IndexError) as exc:
-                raise SystemExit(f"Malformed point label at {labels_file}:{line_number}") from exc
-            if width <= 0 or height <= 0 or not (0 <= x < width and 0 <= y < height):
-                raise SystemExit(f"Out-of-image point at {labels_file}:{line_number}: {(x, y)}")
+                raise SystemExit(f"Malformed point label at {labels_file}:{line_number}: {exc}") from exc
 
             episode = row.get("episode")
             if episode is None:
@@ -120,7 +113,7 @@ def main() -> None:
             records.append(
                 {
                     "image": str(image_path),
-                    "point_xy_100": [100.0 * x / width, 100.0 * y / height],
+                    "point_xy_100": [[100.0 * x / width, 100.0 * y / height] for x, y in points],
                     "label": str(row.get("phrase") or "SO-101 gripper"),
                     "episode": int(episode),
                     "camera": str(row.get("camera") or "unknown"),
@@ -178,7 +171,7 @@ def main() -> None:
         features = Features(
             {
                 "image": Image(),
-                "point_xy_100": [Value("float32")],
+                "point_xy_100": [[Value("float32")]],
                 "label": Value("string"),
                 "episode": Value("int64"),
                 "camera": Value("string"),

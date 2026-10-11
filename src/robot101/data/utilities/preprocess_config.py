@@ -53,6 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-sample-points", type=int, default=128, help="Shared query budget across episodes/stages/source frames; at least 8 per source frame")
     p.add_argument("--query-frames-per-stage", type=int, default=5, help="Spread feature seeds across each wrist tail, as in tapnetCreate.py")
     p.add_argument("--num-poi-points", type=int, default=16)
+    p.add_argument("--pov-gripper-filter", action=argparse.BooleanOptionalAction, default=True,
+                   help="Exclude SAM 2 gripper masks from POV clustering; failed masks require review")
+    p.add_argument("--sam2-model", default="facebook/sam2.1-hiera-tiny")
+    p.add_argument("--sam2-corrections", type=Path,
+                   help="JSON exact-frame positive/negative prompts from scripts/fix_gripper_masks.py")
+    p.add_argument("--gripper-proximity-weight", type=float, default=2.0)
+    p.add_argument("--gripper-proximity-radius", type=float, default=0.05,
+                   help="Proximity radius as fraction of source image diagonal")
     p.add_argument("--n-clusters", type=int, default=6)
     p.add_argument("--static-thresh", type=float, default=0.03)
     p.add_argument("--funnel-quantile", type=float, default=0.4)

@@ -73,13 +73,14 @@ logged in the destination's `point_tracks/skipped_episodes.jsonl`.
 Gripper motion divides episodes into subtasks. Wrist candidates are clustered
 in each stage's final window using the shared query bank and cross-demo
 selection. Selected points track backward through their stages, with previous
-stage points carried forward for continuity. Molmo2 grounds task entities and
-the gripper in third-person images; third-person tracking uses the configured
-FPS. Dataset videos keep the original clean camera frames, while tracked
+stage points carried forward for continuity. SAM 2 excludes POV gripper pixels and weights nearby candidates. Molmo2
+grounds third-person object and gripper candidates at each subtask start,
+tracks them forward at the configured FPS, and selects objects by proximity
+to the gripper at the endpoint. Dataset videos keep the original clean camera frames, while tracked
 coordinates and visibility are saved in point reports. `--viz-dir` writes
-separate overlay images for review. The gripper helps associate the object
-goal, but is never written as a fallback goal point. Unresolved third-person
-stages are flagged for manual correction.
+separate overlay images for review. Valid object goals take priority. If unresolved, a gripper detected on that
+exact endpoint may supply an explicitly marked fallback. Missing masks and
+unresolved third-person stages are flagged for manual correction.
 
 The LeRobot dataset contains clean camera videos and state/action data, with
 point tracks in `point_tracks/`.
@@ -94,3 +95,62 @@ python scripts/inspect_gripper_stages.py --episode 0
 ```
 
 Use `python -m robot101.data.preprocess --help` for all options.
+
+## SAM 2 POV gripper filtering
+
+The preprocessor now enables SAM 2 gripper exclusion by default, using
+`facebook/sam2.1-hiera-tiny`. Rerun Linux package setup to install the official
+SAM 2 video predictor. Linux setup disables its optional CUDA cleanup extension,
+so no nvcc installation is required for that extension. The first run downloads its checkpoint from the Hub.
+BootsTAPIR remains the point tracker. Target-object segmentation is not used.
+
+Useful arguments:
+
+- `--sam2-model facebook/sam2.1-hiera-tiny`: SAM video model.
+- `--gripper-proximity-weight 2`: maximum clustering weight near the gripper.
+- `--gripper-proximity-radius 0.05`: radius as a fraction of the image diagonal.
+- `--no-pov-gripper-filter`: explicitly run the old unfiltered POV behavior.
+
+Masks cover each clustering tail and its next-subtask extension. Missing or
+invalid masks produce no valid POV points for that stage and create review
+items, rather than treating missing masks as background. Inspect initial runs:
+a geometrically valid mask can still segment the wrong object.
+
+Masks are compressed sidecars under `point_tracks/gripper_masks`, with
+seed/end mask-preview JPEGs for visual inspection. Review images
+and requests are under `point_tracks/mask_review`. These are uploaded with the
+point sidecars when `--push-to-hub` is enabled. Training videos stay clean.
+
+On a computer with a display and Tkinter, collect mask prompt corrections:
+
+```bash
+python scripts/fix_gripper_masks.py \
+  --review-dir /path/to/output/point_tracks/mask_review
+```
+
+Left-click visible gripper body/fingers; right-click regions to exclude. Enter
+saves, U undoes, N skips, and Q quits. Add `--overwrite` to revisit corrections. Click coordinates are mapped back to the
+source image. Copy the resulting `mask_corrections.json` to the processing VM
+and rerun the same episode selection with:
+
+```bash
+python -m robot101.data.preprocess \
+  --episodes 0 --dst-repo-id YOUR_ACCOUNT/corrected_grounding \
+  --sam2-corrections /path/to/mask_corrections.json
+```
+
+Use a fresh destination to regenerate episodes already written: `--resume`
+skips completed episodes, including ones containing unresolved stages.
+Corrections use `episode:subtask` keys and exact source `frame_index` values;
+keep the source dataset, stage settings, and clustering windows unchanged.
+
+Third-person object and gripper candidates are grounded at each subtask start
+and tracked forward at the configured sparse FPS. Object goals are selected
+using their proximity to the gripper at the exact endpoint, with the configured
+proximity threshold and ambiguity margin. If the gripper track is lost, Molmo
+may re-detect it only at that exact endpoint for association. When selection
+fails, a gripper detected on that exact endpoint may supply `gripper_fallback`,
+which is tracked backward through the subtask.
+No nearby-frame substitution or POV fallback is allowed. Unresolved
+third-person results retain `manual_review_required` for the existing point
+correction viewer.

@@ -1,167 +1,156 @@
-# SAM 2 Contact-Guided Point Filtering
+# SAM 2 Gripper Filtering for POV Clustering
 
-## Goal
+## Goal and current status
 
-Use the gripper's interaction with an object in the POV/wrist camera to
-automatically prompt SAM 2, then use the object mask to remove irrelevant point
-tracks and weight areas during POV clustering. Keep point tracking and
-clustering responsible for producing the final point trajectories.
+Use SAM 2 to mask the gripper in POV/wrist footage, exclude points on the
+gripper, and give nearby points greater weight during clustering. Keep
+BootsTAPIR for the first implementation. Target-object segmentation and
+TAPNext++ migration are deferred.
 
-SAM 2 applies only to POV/wrist footage in this phase. Third-person cameras use
-Molmo's initial object grounding points and point tracking. A third-person
-gripper location may serve as a grounding reference only on the episode's
-final frame, as described below.
+The Molmo2 connector completed a 2,000-step training run and was uploaded as
+`so101_connector.pt` to both `kdaterao/so101-molmo2-4b-gripper` and
+`kdaterao/so101-molmo2-4b-gripper2`. Its localization quality still needs
+evaluation on held-out images. Training token accuracy does not establish
+gripper point accuracy.
 
-This is a proposed workflow. The current dataset preprocessor still uses
-BootsTAPIR and Molmo2; this document does not describe an implemented change.
+The preprocessor implements this first milestone with Molmo2, SAM 2, and
+BootsTAPIR. See [the run guide](preprocessing.md#sam-2-pov-gripper-filtering)
+for setup, mask corrections, and configuration. Held-out model evaluation and
+GPU mask-quality/throughput validation remain required before a large run.
 
-## Proposed workflow
+## POV gripper masks and clustering
 
-1. **Find likely contact moments.** Use gripper state changes and subtask
-   boundaries to select one or two frames around the approach/close event. Prefer
-   the last frame before contact, when the object is less likely to be occluded.
-2. **Estimate the gripper contact point.** Fine-tune Molmo2 to point to the
-   midpoint between the inner jaw tips. Collect labels from wrist and
-   third-person views so the model sees both camera types. The current label
-   guide asks annotators to click the jaw center; make the contact-point
-   definition explicit before extending that dataset.
-3. **Prompt SAM 2 on the POV frame with the interaction.** Use a visible point
-   on the object immediately beyond the estimated jaw contact point as the positive prompt.
-   The point may need a small offset if the jaw hides the object. Propagate the
-   selected object mask through the relevant POV subtask frames.
-4. **Track point candidates.** Generate candidate point tracks on the POV
-   (wrist) video, then retain candidates that lie inside or near the selected
-   object mask around contact and remain consistent with the propagated mask
-   while visible. Give higher priority to points near the contact location.
-   Cull candidates that remain outside the target mask. Allow configurable
-   boundary tolerance and brief tracking or segmentation misses.
-5. **Cluster and save points.** Keep the existing shared-candidate clustering
-   logic initially. Save the point tracks and mask metadata as sidecar data;
-   keep the source videos clean.
+1. **Select and prompt the gripper.** Ask Molmo for points on visible gripper
+   body or fingers and use them as positive SAM 2 prompts. Keep these separate
+   from the jaw-center contact point: the latter can fall in empty space and
+   is not a reliable segmentation prompt. Do not use a fixed pixel offset to
+   turn a jaw-center prediction into a body point.
+2. **Propagate the mask.** Initialize SAM 2 for each stage's clustering clip
+   and propagate the gripper mask through its tail window, including the
+   existing 10-frame extension into the next subtask. Cover the whole stage
+   when shorter than the tail window; truncate extensions at the episode end.
+3. **Exclude gripper points.** Reject candidate endpoints inside the gripper
+   mask at the selection endpoint. Exclude masked trajectory observations
+   from motion, endpoint, and proximity statistics rather than treating them
+   as valid stationary observations.
+4. **Weight nearby eligible points.** Increase clustering weight for points
+   outside but near the mask. Use a maximum weight of **2×**, tapering linearly
+   to **1×** over **5% of the source image diagonal**. Make the maximum weight
+   and distance fraction configurable. Apply weights to eligible observations
+   only; proximity must never override inside-mask exclusion.
+5. **Preserve point tracking.** Keep tail-window clustering, shared candidate
+   identities and cross-demo selection, backward BootsTAPIR tracking across
+   each full stage, and the existing transition overlap. The mask filters
+   clustering candidates; it does not replace point trajectories.
+6. **Review unresolved masks.** Queue missing or invalid prompts/masks for
+   human correction on the exact affected image. Do not treat a missing mask
+   as confirmed background or silently publish unfiltered grounding as valid.
+   Resume affected filtering after correction.
 
-The mask is an object-selection and filtering signal. It does not replace the
-precise point trajectory, and SAM 2 does not semantically understand parts such
-as “gripper finger.”
+For eligible observations, the proposed proximity weight is
+`w(d) = 1 + (w_max - 1) * max(0, 1 - d / r)`, where `d` is distance to the
+nearest gripper-mask pixel and `r = 0.05 * sqrt(width² + height²)` by default.
+Use source-image coordinates consistently when mapping masks and tracks.
 
-## Gripper endpoint data
+SAM 2 is **POV-only** in this milestone and segments the **gripper only**.
+Do not restrict candidates to a target-object mask. Nearby background remains
+possible; proximity is a ranking signal, not proof of object contact.
 
-The intended label is the contact location between the inner jaw tips, not an
-arbitrary point on the gripper body. Include open, closed, approaching,
-partially occluded, wrist-camera, and third-person examples. The model should
-return a point in source-image pixel coordinates. Run it only on selected
-POV contact frames and third-person episode-end frames, and batch requests
-across episodes rather than grounding every video frame. Plan to fine-tune on
-a few thousand labeled gripper images covering these views and conditions;
-include final-frame third-person examples in the collection.
+## Molmo prompts and evaluation
 
-If confidence is low, check temporal consistency across the nearby sampled
-frames. For POV frames, also check whether the proposed contact point has a
-plausible nearby object mask. Route only unresolved cases to human review.
+Evaluate jaw-center predictions separately from gripper-body/finger prompts.
+The existing jaw-center fine-tune does not establish reliable body prompting
+or segmentation. Include held-out wrist and third-person images, open and
+closed jaws, varied poses, partial occlusion, and subtask-end frames.
 
-## Third-person gripper reference: episode end only
+Return points in source-image pixel coordinates. Batch requests for selected
+POV mask-initialization frames and exact third-person subtask-end frames;
+avoid grounding every video frame. The current adapter has no calibrated
+confidence score, so use explicit point/mask validity checks and human review
+rather than an assumed confidence threshold.
 
-Molmo continues to provide task-conditioned object grounding points for the
-third-person cameras. The fine-tuned gripper detector can provide an additional
-reference on the exact final frame of each episode (`frame_index == n_frames - 1`)
-for each available third-person camera. Use its contact-point location to help
-rank or validate nearby object grounding candidates on that same frame.
+## Third-person fallback: exact subtask end
 
-This permission applies to the episode endpoint, not every subtask endpoint.
-Earlier third-person subtasks use object grounding without gripper-based
-association or a requirement to detect the gripper. SAM 2 remains POV-only.
-Keep the gripper reference distinct from the selected object point: detecting
-the gripper alone does not establish a valid object grounding label.
+For each available third-person camera, discover object and gripper candidates
+on the exact subtask-start frame and track them forward. Select the goal object
+by proximity to the gripper at the subtask endpoint, using the configured
+proximity threshold and ambiguity margin. If the gripper track is lost,
+re-detect the gripper on that exact endpoint frame for association. Preserve
+this start-frame discovery and forward-tracking path; SAM 2 applies only to POV.
 
-Use the exact endpoint image. If that camera frame or the gripper detection is
-unavailable, mark the reference unresolved and retain any independently valid
-object grounding. Do not substitute a gripper position from a nearby frame.
-Record the reference camera, episode/frame index, coordinates, validity, and
-whether it influenced object selection in the point sidecar.
+When object grounding is unresolved, permit a gripper-point fallback only if
+Molmo detects the gripper on the **exact last frame of that subtask**. This
+replaces the earlier episode-end-only restriction and applies to intermediate
+and final subtasks alike.
 
-During implementation, remove the current third-person stage logic's dependence
-on gripper detection and gripper/object proximity at every stage. Gate the new
-reference path explicitly on the final episode frame. Tracking from a selected
-endpoint object point should stay within its relevant subtask.
+- Never substitute a gripper detection from a nearby frame or another camera.
+- Seed the detected endpoint point and track it backward through its subtask
+  using the existing third-person tracking settings, including configurable
+  sparse tracking FPS. Preserve the existing output transition overlap.
+- Record the source as `gripper_fallback`, keeping it distinct from object
+  grounding. A gripper fallback is not a verified object contact label.
+- If the endpoint image is missing, or neither object nor gripper grounding
+  is valid, queue human correction and mark the stage unresolved.
+- Never use gripper fallback for POV clustering. SAM 2 remains POV-only.
 
-## Selected tracker: TAPNext++
+Save the camera, source episode and subtask, exact seed frame, point coordinates,
+grounding provenance, and review status in sidecar metadata. Use the actual
+last included subtask frame, respecting the pipeline's boundary convention.
 
-The active preprocessor currently creates `BootsTAPIR` in
-`src/robot101/data/preprocess.py`; the wrapper lives in
-`src/robot101/perception/tracking.py`. The TapNet checkout includes TAPNext and
-TAPNext++ implementations. The intended replacement is **TAPNext++**. This
-section is the implementation plan; the active preprocessor has not yet been
-converted.
+## Outputs and scaling
 
-TAPNext++ is selected for its long-sequence and re-detection focus. Its authors
-report up to 562 FPS for 256 query points on an H100, while TAPIR reports about
-40 FPS online for 256 points at 256×256 on a modern GPU. These figures use
-different hardware and settings, so they motivate a local benchmark but do not
-predict the end-to-end speedup for this preprocessor.
+Keep training videos clean. Save point tracks, masks with frame associations,
+fallback provenance, and review status as sidecars; viewers may render overlays.
+Retain existing point-sidecar fields while adding the new metadata.
 
-### Conversion steps
+- Batch Molmo image requests where supported.
+- Run SAM 2 per selected POV stage clip, not separately for each candidate.
+- Preserve existing BootsTAPIR batching and cross-demo feature reuse.
+- Parallelize Hub downloads and CPU decoding independently of GPU inference.
+- Measure mask inference, tracking, decoding, and total episode time separately,
+  including CPU RAM, GPU VRAM, and GPU utilization.
 
-1. Add a TAPNext++ adapter alongside `BootsTAPIR` in
-   `src/robot101/perception/tracking.py`, matching the existing point and
-   visibility tensor shapes used by preprocessing.
-2. Load the official TAPNext++ checkpoint and preprocessing configuration from
-   the TapNet checkout; document the checkpoint download and runtime
-   dependencies.
-3. Replace the preprocessing tracker's default with TAPNext++ while retaining
-   BootsTAPIR as an explicit comparison option during the transition.
-4. Preserve third-person Molmo grounding, POV SAM 2 filtering, saved sidecar schema, and
-   clean-video output. Preserve the clustering objective and selection rules,
-   while allowing tracker-specific query initialization to change.
-5. Adapt endpoint-to-start tracking by reversing the stage frame sequence,
-   seeding at the endpoint, and mapping returned tracks and visibility back to
-   chronological frame order. Validate query-frame indexing, coordinate
-   transforms, state resets, and masks against that reversed ordering.
-6. Replace TAPIR's shared appearance-feature bank with TAPNext++ query points
-   and recurrent states. Initialize candidate points in each episode's sampled
-   tail frames, then test how to align candidate identities across demos;
-   TAPIR's cached descriptors cannot simply be passed into TAPNext++.
-7. Compare BootsTAPIR and TAPNext++ on the same episodes and sampled frames
-   before removing the old backend or changing other pipeline behavior.
+## Validation and milestones
 
-## Scaling plan
+1. **Evaluate the connector.** Measure point error and inspect held-out POV and
+   third-person predictions, including open jaws and occlusion. Assess body
+   prompts independently of contact-point predictions.
+2. **Validate masks with BootsTAPIR.** Inspect SAM 2 gripper masks across tail
+   windows and the 10-frame next-subtask extension. Test short stages, final
+   stages, missing frames, and failed prompts/masks.
+3. **Check filtering and weighting.** Inside-mask endpoints must be rejected;
+   masked observations must not enter clustering statistics. Outside points
+   must receive the configured weights, with 2× near the boundary and 1× at
+   or beyond the default radius. Missing masks must require review.
+4. **Check third-person fallback.** Cover intermediate and final subtasks,
+   missing endpoint images, failed gripper detections, and valid object points.
+   Confirm exact-frame seeding, backward tracking, `gripper_fallback`
+   provenance, and absence of POV fallback.
+5. **Inspect saved data.** Confirm clean videos, preserved transition overlap,
+   aligned mask/point sidecars, and explicit unresolved/review status. Compare
+   cluster quality and processing cost against the current pipeline.
+6. **Benchmark TAPNext++ later.** Begin tracker migration only after gripper
+   filtering works. Compare identical clips and point sets for tracking quality
+   and end-to-end throughput before changing the default backend.
 
-- Use gripper-state changes to select a small number of contact frames.
-- Batch Molmo requests for POV contact frames and third-person episode-end
-  references across episodes on the GPU.
-- Run SAM 2 once per selected POV object/subtask and propagate its mask through
-  sampled wrist frames; avoid running a separate segmentation request per candidate
-  point.
-- Batch candidate queries through the point tracker where supported.
-- Keep Hugging Face frame downloads and CPU video decoding parallelized
-  independently from GPU inference.
-- Store masks and confidence/review metadata as sidecars rather than drawing
-  overlays into training videos.
+## Future milestone: TAPNext++
 
-## Evaluation before replacing the current pipeline
+Keep BootsTAPIR active throughout the gripper-filtering milestone. A subsequent
+TAPNext++ adapter must preserve point/visibility shapes, coordinate transforms,
+reverse-stage tracking, sidecars, and transition overlap.
 
-Use the same representative episodes and frame samples for BootsTAPIR and
-TAPNext++. Include short and long stages, gripper occlusion, object motion, and
-multiple subtasks. Compare:
-
-- tracker-only time and end-to-end time;
-- peak CPU RAM and GPU VRAM, plus GPU utilization;
-- point visibility and manual point-position error on a small labeled subset;
-- fraction of POV candidates retained by the object mask;
-- cluster consistency and the number of unresolved masks or contact points.
-
-Check that third-person gripper references occur only at `n_frames - 1`,
-including episodes with multiple subtasks. Cover missing endpoint camera
-frames and failed gripper detections; earlier third-person stages must still
-ground objects independently.
-
-The conversion target is TAPNext++. Keep BootsTAPIR available until TAPNext++
-preserves useful point tracks and improves end-to-end processing time. The
-current pipeline has had low average GPU utilization, so tracker speed alone
-may not determine overall throughput.
+TAPIR's shared appearance-feature bank cannot simply be passed to TAPNext++.
+Design and validate an alternative for candidate identity alignment across
+demos before replacing that functionality. Retain BootsTAPIR for comparisons;
+reported tracker FPS on different hardware does not establish an end-to-end
+speedup for this pipeline.
 
 ## Relevant implementation
 
 - [Grounded preprocessing](../src/robot101/data/preprocess.py)
 - [Molmo2 inference adapter](../src/robot101/perception/molmo2.py)
+- [Point tracking](../src/robot101/perception/tracking.py)
 - [Gripper point collection](../src/robot101/data/collect_points.py)
 - [Gripper point labeling guide](molmo_gripper_point_data.md)
+- [Molmo2 training guide](molmo2_training.md)
 - [TapNet checkout](../tapnet/README.md)

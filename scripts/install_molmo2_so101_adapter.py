@@ -42,7 +42,7 @@ class So101GripperPoints(Dataset):
             "image": row["image"],
             "message_list": [{
                 "label": row["label"],
-                "points": np.asarray(row["point_xy_100"], dtype=np.float32).reshape(1, 2),
+                "points": np.asarray(row["point_xy_100"], dtype=np.float32).reshape(-1, 2),
                 "point_scale": 100,
                 "clip_points": True,
                 "style": "pointing",

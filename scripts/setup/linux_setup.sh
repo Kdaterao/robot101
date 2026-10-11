@@ -43,7 +43,7 @@ if [[ "${SKIP_APT:-0}" != 1 ]]; then
   fi
   sudo apt-get update -y
   sudo apt-get install -y git curl ca-certificates ffmpeg tmux python3.12 \
-    python3.12-venv python3.12-dev build-essential
+    python3.12-venv python3.12-dev python3-tk build-essential
 fi
 if ! command -v uv >/dev/null 2>&1; then
   curl --fail --location --silent --show-error https://astral.sh/uv/install.sh | sh
@@ -58,7 +58,8 @@ if [[ ! -x "$ENV_DIR/bin/python" ]]; then
 fi
 uv pip install --python "$ENV_DIR/bin/python" torch==2.10.0 torchvision==0.25.0 \
   --index-url https://download.pytorch.org/whl/cu130
-"$ENV_DIR/bin/python" scripts/install_requirements.py --profile grounded \
+# SAM inference uses CUDA Torch; its optional cleanup extension needs nvcc.
+SAM2_BUILD_CUDA=0 "$ENV_DIR/bin/python" scripts/install_requirements.py --profile grounded \
   --installer uv --pin torch==2.10.0 --pin torchvision==0.25.0
 # Match Torch 2.10; CPU decoding avoids CUDA NPP library requirements.
 uv pip install --python "$ENV_DIR/bin/python" --no-deps torchcodec==0.10.0 \
@@ -75,6 +76,7 @@ import einops
 from robot101.data.utilities.episode_helpers import _load_lerobot
 from robot101.perception.molmo2 import Molmo2Worker
 from robot101.perception.tracking import BootsTAPIR
+from sam2.sam2_video_predictor import SAM2VideoPredictor
 _load_lerobot()
 spacy.load('en_core_web_sm')
 if not torch.cuda.is_available():
@@ -115,7 +117,7 @@ uv pip install --python "${VENV_PYTHON}" --reinstall --no-deps \
 
 echo "Installing the pinned Molmo2 training stack (includes datasets and HF Hub)..."
 uv pip install --python "${VENV_PYTHON}" -e "${MOLMO2_REPO}[train]"
-uv pip install --python "${VENV_PYTHON}" --no-deps -e .
+"${VENV_PYTHON}" scripts/install_requirements.py --profile molmo2 --installer uv
 
 echo "Checking CUDA and required imports..."
 "${VENV_PYTHON}" - <<'PY'
@@ -123,6 +125,7 @@ import torch
 import datasets
 import huggingface_hub
 import torchcodec
+import omegaconf
 
 print(f"PyTorch: {torch.__version__}; CUDA runtime: {torch.version.cuda}")
 if not torch.cuda.is_available():
@@ -134,6 +137,7 @@ if "A6000" not in name:
     print("Warning: this VM is not reporting an RTX A6000.")
 print(f"datasets: {datasets.__version__}; huggingface_hub: {huggingface_hub.__version__}")
 print(f"torchcodec: {torchcodec.__version__}; import OK")
+print(f"OmegaConf: {omegaconf.__version__} (Molmo2 schema compatibility pin)")
 PY
 
 echo "Package setup complete. Run commands: docs/molmo2_training.md"

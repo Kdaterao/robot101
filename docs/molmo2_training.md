@@ -12,6 +12,18 @@ hf auth login
 This prepares the pinned Molmo2 checkout at `molmo2_so101_run/molmo2` and its
 training dependencies.
 
+The training profile pins OmegaConf to 2.3.0 for Molmo2's legacy tuple
+annotations. If an existing environment fails before training with
+`TupleConfig length 8 does not match type hint length 1` for
+`candidate_sampling_fps`, activate `.venv-molmo2` and run:
+
+```bash
+python scripts/install_requirements.py --profile molmo2
+```
+
+Then rerun the training command. This error occurs while constructing the
+model configuration, before any training steps.
+
 ## Prepare point labels
 
 ```bash
@@ -22,7 +34,8 @@ python scripts/prepare_molmo_so101.py \
   --push-to-hub --hub-repo-id kdaterao/so101_molmo2_gripper_preprocessed
 ```
 
-This reads user-clicked points and makes episode-disjoint train/validation
+This reads one or multiple user-clicked gripper points per image and makes
+episode-disjoint train/validation
 splits. Omit `--push-to-hub` for local preparation; add `--public` when creating
 a public dataset (private by default). Robot video processing has its own
 [guide](preprocessing.md).
@@ -33,6 +46,11 @@ increasing waits. Rerun the same command after an interruption: keep
 with `--download-workers 4`, or retry limits with `--download-attempts 15`
 and `--download-retry-wait 35` (seconds). More workers do not increase the
 Hub request quota.
+
+After updating the code, rerun preparation to rebuild the point lists and
+rerun the adapter installation below before training. Existing single-point
+labels and prepared singleton examples remain compatible. Multiple points in
+one image stay in one example; they do not count as separate training images.
 
 ## Install the adapter and download the training checkpoint
 

@@ -7,6 +7,7 @@ Preferred workflow (small Hub pulls + review):
 from __future__ import annotations
 
 from robot101.paths import REPO_ROOT
+from robot101.data.utilities.point_labels import pixel_points
 
 import argparse
 import json
@@ -601,18 +602,37 @@ def _remove_skipped_path(skipped_path: Path, image: str) -> None:
         f.writelines(kept_lines)
 
 
+def _save_point_label(labels_path: Path, row: dict, replace_existing: bool) -> None:
+    """Replace a relabeled image atomically; preserve other annotations."""
+    if not replace_existing:
+        with labels_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row)+"\n")
+        return
+    lines = []
+    for line in labels_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        current = json.loads(line)
+        if str(current.get("image", "")).replace("\\", "/") != row["image"]:
+            lines.append(line)
+    lines.append(json.dumps(row))
+    temporary = labels_path.with_suffix(".jsonl.tmp")
+    temporary.write_text("\n".join(lines)+"\n", encoding="utf-8")
+    temporary.replace(labels_path)
+
+
 class PointLabeler:
-    """OpenCV single-click point labeler."""
+    """OpenCV multiple-point labeler; each click marks a distinct gripper."""
 
     def __init__(self, window: str = "locate_label"):
         self.window = window
-        self.point: tuple[int, int] | None = None
+        self.points: list[tuple[int, int]] = []
         self.base: np.ndarray | None = None
         self.view: np.ndarray | None = None
 
     def set_image(self, bgr: np.ndarray) -> None:
         self.base = bgr.copy()
-        self.point = None
+        self.points = []
         self._redraw()
 
     def _clamp(self, x: int, y: int) -> tuple[int, int]:
@@ -634,20 +654,29 @@ class PointLabeler:
     def _redraw(self) -> None:
         assert self.base is not None
         vis = self.base.copy()
-        if self.point is not None:
-            x, y = self.point
+        for index, (x, y) in enumerate(self.points, start=1):
             cv2.drawMarker(vis, (x, y), (0, 255, 0), cv2.MARKER_CROSS, 22, 2)
             cv2.circle(vis, (x, y), 5, (0, 255, 0), 2)
+            cv2.putText(vis, str(index), (x+8, y-8), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 255, 0), 1)
         self.view = vis
         cv2.imshow(self.window, vis)
 
     def on_mouse(self, event: int, x: int, y: int, flags: int, param) -> None:
         if self.base is not None and event == cv2.EVENT_LBUTTONDOWN:
-            self.point = self._clamp(x, y)
+            point = self._clamp(x, y)
+            if point not in self.points:
+                self.points.append(point)
+            self._redraw()
+        elif self.base is not None and event == cv2.EVENT_RBUTTONDOWN:
+            self.undo_point()
+
+    def undo_point(self) -> None:
+        if self.points:
+            self.points.pop()
             self._redraw()
 
     def clear_point(self) -> None:
-        self.point = None
+        self.points = []
         self._redraw()
 
 
@@ -690,6 +719,13 @@ def run_label_ui(
         return "empty"
 
     labeled = _load_labeled_paths(labels_path)
+    existing_labels = set(labeled)
+    existing_rows = {}
+    if labels_path.is_file() and (relabel_all or not only_unlabeled):
+        for line in labels_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                record = json.loads(line)
+                existing_rows[str(record.get("image", "")).replace("\\", "/")] = record
     previously_skipped = _load_labeled_paths(skipped_path)
     if relabel_all:
         pending = images
@@ -709,8 +745,8 @@ def run_label_ui(
         f"Images: {len(images)} total, {len(pending)} to label, "
         f"{len(previously_skipped)} previously skipped, phrase={phrase!r}"
     )
-    print("Click the center of the gripper jaws.")
-    print("Controls: click=mark | s=save | n=skip | u=clear point | q=quit")
+    print("Click the jaw center of each distinct gripper.")
+    print("Controls: click=add point | right-click/u=undo | c=clear all | s=save all | n=skip | q=quit")
 
     if not pending:
         print("Nothing to label.")
@@ -733,6 +769,13 @@ def run_label_ui(
             continue
 
         labeler.set_image(bgr)
+        if rel in existing_rows:
+            try:
+                labeler.points = [tuple(max(0, min(limit-1, int(round(v)))) for v, limit in zip(point, [bgr.shape[1], bgr.shape[0]])) for point in
+                                  pixel_points(existing_rows[rel], bgr.shape[1], bgr.shape[0])]
+                labeler._redraw()
+            except (KeyError, TypeError, ValueError) as exc:
+                print(f"  Existing points invalid; label again: {exc}")
         title = f"[{i + 1}/{len(pending)}] {path.name}"
         cv2.setWindowTitle(labeler.window, title)
         print(title)
@@ -750,21 +793,23 @@ def run_label_ui(
                 i += 1
                 break
             if key == ord("u"):
+                labeler.undo_point()
+                continue
+            if key == ord("c"):
                 labeler.clear_point()
                 continue
             if key == ord("s"):
-                point = labeler.point
-                if point is None:
-                    print("  Click the gripper point before saving (s).")
+                points = labeler.points
+                if not points:
+                    print("  Click at least one gripper point before saving (s).")
                     continue
                 ep, fr, cam = _parse_meta_from_name(path.name)
                 h, w = bgr.shape[:2]
-                x, y = point
                 row = {
                     "image": rel.replace("\\", "/"),
                     "phrase": phrase,
-                    "point_xy": [int(x), int(y)],
-                    "point_xy_norm": [float(x / max(1, w - 1)), float(y / max(1, h - 1))],
+                    "points_xy": [[int(x), int(y)] for x, y in points],
+                    "points_xy_norm": [[float(x / max(1, w - 1)), float(y / max(1, h - 1))] for x, y in points],
                     "point_target": "center_of_gripper_jaws",
                     "width": w,
                     "height": h,
@@ -772,13 +817,16 @@ def run_label_ui(
                     "frame": fr,
                     "camera": cam,
                 }
-                with labels_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(row) + "\n")
+                if len(points) == 1:
+                    row["point_xy"] = row["points_xy"][0]
+                    row["point_xy_norm"] = row["points_xy_norm"][0]
+                _save_point_label(labels_path, row, rel in existing_labels)
+                existing_labels.add(rel)
                 _remove_skipped_path(skipped_path, rel)
                 previously_skipped.discard(rel)
                 labeled.add(rel)
                 saved += 1
-                print(f"  saved point {row['point_xy']} -> {labels_path.name}")
+                print(f"  saved {len(points)} points {row['points_xy']} -> {labels_path.name}")
                 i += 1
                 break
 
@@ -974,7 +1022,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_sample)
 
-    lp = sub.add_parser("label", help="OpenCV single-click UI to write point_labels.jsonl")
+    lp = sub.add_parser("label", help="OpenCV multiple-point UI to write point_labels.jsonl")
     lp.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output root with images/")
     lp.add_argument("--phrase", default=DEFAULT_PHRASE, help="Description associated with each labeled point")
     lp.add_argument("--relabel-all", action="store_true", help="Ignore existing point_labels.jsonl entries")

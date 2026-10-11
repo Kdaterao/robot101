@@ -1,7 +1,7 @@
 # Build the Molmo gripper point dataset
 
 This workflow samples third-person images from the SO-101 dataset and lets a
-person click the gripper jaw center. The resulting point labels can supervise
+person click one jaw-center point for each visible gripper. The resulting point labels can supervise
 Molmo gripper grounding.
 
 From the repository root, prepare a local labeling environment and sign in to
@@ -46,12 +46,15 @@ as batches advance. Add `--shuffle --seed 42` to randomize episode selection
 reproducibly. `--repo-id` chooses the source dataset, `--out` changes the local
 label folder, and `--video-backend pyav|torchcodec` selects video decoding.
 
-Click the center of the gripper jaws. Press `s` to save, `n` to skip, and `q` to
-quit. The batch cursor and labels are saved under `data/locate_gripper/`, so the
-next run can continue. To sample images without the batch loop, use the
+Click the center of each distinct gripper’s jaws; each click adds a point.
+Use right-click or `u` to undo the last point, `c` to clear all points, `s` to
+save all points for the image, `n` to skip, and `q` to quit. Do not label
+separate fingers as separate grippers. The batch cursor and labels are saved
+under `data/locate_gripper/`, so the next run can continue. To sample images without the batch loop, use the
 `sample` command, then run `label`. Use `label --phrase "SO-101 gripper"` to set
 the text associated with each point, or `label --relabel-all` to revisit saved
-images.
+images. Relabeling displays existing points and replaces that image’s annotation
+when saved, instead of appending a duplicate row.
 
 Upload the labeled images and points to the default dataset repo
 `kdaterao/so101_locate_gripper`:
@@ -61,6 +64,11 @@ python -m robot101.data.collect_points push
 # Choose a different repo or make it private:
 python -m robot101.data.collect_points push --hf-repo-id YOUR_USER/REPO --private
 ```
+
+New annotations store `points_xy` and `points_xy_norm` as lists of coordinate
+pairs. Existing singleton annotations remain supported. Preparation keeps all
+points together in one image example, and the Molmo training adapter accepts
+both older flat and new nested `point_xy_100` arrays.
 
 The output is point supervision; it does not fine-tune or upload Molmo model
 weights.

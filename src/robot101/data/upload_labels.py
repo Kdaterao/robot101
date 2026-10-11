@@ -73,8 +73,8 @@ labels.jsonl       # legacy click-drag boxes (xyxy pixels), when present
 {{
   "image": "images/ep000500_f000120_top.jpg",
   "phrase": "SO-101 gripper",
-  "point_xy": [x, y],
-  "point_xy_norm": [x_normalized, y_normalized],
+  "points_xy": [[x1, y1], [x2, y2]],
+  "points_xy_norm": [[x1_normalized, y1_normalized], [x2_normalized, y2_normalized]],
   "point_target": "center_of_gripper_jaws",
   "width": 640,
   "height": 480,
@@ -84,7 +84,7 @@ labels.jsonl       # legacy click-drag boxes (xyxy pixels), when present
 }}
 ```
 
-Points are collected with a single click using `src/robot101/data/collect_points.py`. Point labels are intended for the custom MolmoPoint fine-tuning workflow.
+Click once per distinct gripper jaw center; an image may contain multiple points. Legacy `point_xy` and `point_xy_norm` singleton records remain supported. Points are collected using `src/robot101/data/collect_points.py`. Point labels are intended for the custom MolmoPoint fine-tuning workflow.
 
 ```bash
 python -m robot101.data.collect_points batch

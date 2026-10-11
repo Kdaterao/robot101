@@ -7,7 +7,11 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
-import math
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from robot101.data.utilities.point_labels import point_pairs
 from urllib.parse import urlparse
 import webbrowser
 
@@ -24,7 +28,7 @@ svg{width:100%;max-height:70vh}pre{white-space:pre-wrap;overflow-wrap:anywhere;b
 </style></head><body><main>
 <h1>SO-101 point dataset</h1><p id="repo"></p>
 <nav><label>Split <select id="split"></select></label><label>Camera <select id="camera"></select></label>
-<label>Episode <select id="episode"></select></label><label><input type="checkbox" id="overlay" checked>Show point</label></nav>
+<label>Episode <select id="episode"></select></label><label><input type="checkbox" id="overlay" checked>Show points</label></nav>
 <nav><button id="prev">← Previous</button><button id="next">Next →</button><button id="random">Random</button>
 <label>Sample <input id="jump" type="number" min="1"></label><span id="count"></span></nav>
 <p id="status" role="status">Loading dataset…</p><div id="canvas"></div><pre id="details"></pre>
@@ -39,9 +43,9 @@ if(!row){$('status').textContent='No samples match these filters.';return;}$('st
 try{const response=await fetch(`/sample/${row.id}`);if(!response.ok)throw Error(await response.text());const sample=await response.json();if(request!==serial)return;
 const ns='http://www.w3.org/2000/svg';const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${sample.width} ${sample.height}`);svg.setAttribute('role','img');svg.setAttribute('aria-label',`Image and point label: ${row.label}`);
 const image=document.createElementNS(ns,'image');image.setAttribute('width',sample.width);image.setAttribute('height',sample.height);image.setAttribute('href',`/image/${row.id}`);image.addEventListener('error',()=>{$('status').textContent='Image failed to load.';});svg.append(image);
-if(sample.point_xy&&$('overlay').checked){const [x,y]=sample.point_xy;const radius=Math.max(sample.width,sample.height)*.012;
+if($('overlay').checked){for(const [x,y] of (sample.points_xy||[])){const radius=Math.max(sample.width,sample.height)*.012;
 const marker=document.createElementNS(ns,'circle');for(const [k,v]of Object.entries({cx:x,cy:y,r:radius,fill:'none',stroke:'#ff375f','stroke-width':Math.max(2,radius/4)}))marker.setAttribute(k,v);svg.append(marker);
-const cross=document.createElementNS(ns,'path');cross.setAttribute('d',`M ${x-radius*1.6} ${y} H ${x+radius*1.6} M ${x} ${y-radius*1.6} V ${y+radius*1.6}`);cross.setAttribute('stroke','#ff375f');cross.setAttribute('stroke-width',Math.max(1,radius/6));svg.append(cross);}
+const cross=document.createElementNS(ns,'path');cross.setAttribute('d',`M ${x-radius*1.6} ${y} H ${x+radius*1.6} M ${x} ${y-radius*1.6} V ${y+radius*1.6}`);cross.setAttribute('stroke','#ff375f');cross.setAttribute('stroke-width',Math.max(1,radius/6));svg.append(cross);}}
 $('canvas').append(svg);$('details').textContent=JSON.stringify({...row,...sample},null,2);$('status').textContent=sample.warning||'';
 }catch(e){if(request===serial)$('status').textContent=String(e);}}
 $('prev').onclick=()=>{if(index>0){index--;show();}};$('next').onclick=()=>{if(index+1<filtered.length){index++;show();}};
@@ -89,21 +93,20 @@ class DatasetViewer:
         with Image.open(source) as loaded:
             image = loaded.convert('RGB')
         width, height = image.size
-        point = None
+        points = []
         warning = None
         try:
-            coords = row['point_xy_100']
-            if len(coords) != 2:
-                raise ValueError('expected two coordinates')
-            x, y = [float(value) for value in coords]
-            if not all(math.isfinite(v) and 0 <= v < 100 for v in (x, y)):
+            coords = point_pairs(row['point_xy_100'])
+            if any(not (0 <= x < 100 and 0 <= y < 100) for x, y in coords):
                 raise ValueError('coordinates must be finite and in [0, 100)')
-            # Exact inverse of prepare_molmo_so101.py, not width-1/height-1.
-            point = [x * width / 100, y * height / 100]
+            # Exact inverse of preparation, not width-1/height-1.
+            points = [[x * width / 100, y * height / 100] for x, y in coords]
         except (TypeError, ValueError, KeyError) as exc:
             warning = f'Invalid point annotation: {exc}'
-        return image, dict(width=width, height=height, point_xy=point,
-                           point_xy_100=row.get('point_xy_100') if point else None, warning=warning)
+        return image, dict(width=width, height=height, points_xy=points,
+                           point_xy=points[0] if len(points) == 1 else None,
+                           point_xy_100=row.get('point_xy_100') if points else None, warning=warning)
+
 
 
 class Handler(BaseHTTPRequestHandler):
