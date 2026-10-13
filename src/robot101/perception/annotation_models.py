@@ -82,6 +82,7 @@ class Captioner:
         self.processor = AutoProcessor.from_pretrained(model_id, revision=revision)
         self.processor.tokenizer.padding_side = "left"
         config = AutoConfig.from_pretrained(model_id, revision=revision)
+        self.qwen_video = kind == "video" and config.model_type == "qwen2_5_vl"
         # PerceptionLM's timm wrapper rejects a propagated SDPA setting.
         # Keep SDPA on the language model and let timm manage vision attention.
         attention = ({"": "eager", "vision_config": "eager", "text_config": "sdpa"}
@@ -89,7 +90,7 @@ class Captioner:
         self.model = AutoModelForImageTextToText.from_pretrained(
             model_id, revision=revision, config=config, torch_dtype=self.dtype,
             attn_implementation=attention, low_cpu_mem_usage=True).eval().to(device)
-        if kind == "video":
+        if kind == "video" and not self.qwen_video:
             # The HF checkpoint's timm tower can have a fixed 448px grid.
             # Adapt its positional embeddings/grid, not just its processor,
             # to the paper's 320px video input.
@@ -108,8 +109,17 @@ class Captioner:
         if self.kind == "video":
             # Supply decoded sparse frames directly. Do not let the processor
             # sample another clip or silently resize it to its 448px default.
+            video_kwargs = dict(size={"height": 320, "width": 320})
+            if self.qwen_video:
+                # Qwen's 14px patches and 2x merge require a 28px grid.
+                # Use 308px (nearest grid below 320), and preserve source
+                # timing so the processor derives the sparse clip's FPS.
+                video_kwargs = dict(size={"shortest_edge": 308 ** 2, "longest_edge": 308 ** 2},
+                                    video_metadata=[dict(fps=r["fps"], frames_indices=r["frame_indices"],
+                                                         total_num_frames=r["total_num_frames"])
+                                                    for r in requests])
             inputs = self.processor(text=text, videos=[r["frames"] for r in requests],
-                                    do_sample_frames=False, size={"height": 320, "width": 320},
+                                    do_sample_frames=False, **video_kwargs,
                                     padding=True, return_tensors="pt")
         else:
             inputs = self.processor(text=text, images=[r["frames"][0] for r in requests],

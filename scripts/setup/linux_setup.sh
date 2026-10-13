@@ -11,7 +11,7 @@ Usage: bash scripts/setup/linux_setup.sh [--profile grounded|molmo2|annotation|r
   grounded  Molmo2 inference + TAPIR + video preprocessing (default; .venv-grounded)
   molmo2    Molmo2 connector training dependencies (.venv-molmo2)
   robot     Robot control and SmolVLA dependencies (.venv)
-  annotation V-JEPA 2.1 + PLM/Qwen captions + Claude aggregation (.venv-annotation)
+  annotation V-JEPA 2.1 + Qwen video/image captions + Claude aggregation (.venv-annotation)
   all       Prepare all four isolated environments
 
 Set SKIP_APT=1 to skip Ubuntu system packages when already installed.
@@ -167,7 +167,7 @@ uv pip install --python "$ENV_DIR/bin/python" --no-deps torchcodec==0.10.0 \
   --index-url https://download.pytorch.org/whl/cpu
 "$ENV_DIR/bin/python" - <<'PY'
 import torch
-from transformers import PerceptionLMForConditionalGeneration, Qwen3VLForConditionalGeneration
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration
 from robot101.data.annotate import build_parser
 from robot101.data.utilities.episode_helpers import _load_lerobot
 from anthropic import Anthropic

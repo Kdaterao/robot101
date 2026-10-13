@@ -5,10 +5,9 @@ temporal Ward hierarchies and the Tree-of-Captions: midpoint image captions on
 retained leaves, video captions on retained internal nodes, and text aggregation
 using descendant and root context. It substitutes V-JEPA **2.1 ViT-L**, Qwen3-VL
 **8B**, and Claude **Haiku** for the paper's encoder/image/aggregation models.
-PerceptionLM-3B remains the video captioner.
-Its timm vision wrapper uses the `eager` attention configuration while its
-language model uses SDPA; Qwen uses SDPA. This avoids passing an unsupported
-SDPA configuration to the timm wrapper.
+Qwen2.5-VL-7B-Instruct replaces PerceptionLM for internal-node video captions.
+Qwen3-VL-8B-Instruct remains the leaf-image captioner. Both use SDPA. This further
+model substitution needs quality and runtime evaluation; a speedup is not assumed.
 
 These commands annotate existing LeRobot episodes. They do **not** run Molmo,
 TAPIR, or SAM 2, modify the grounding preprocessor, or train models. Original
@@ -24,9 +23,8 @@ source .venv-annotation/bin/activate
 hf auth login
 ```
 
-Accept access to [PerceptionLM-3B](https://huggingface.co/facebook/Perception-LM-3B)
-with the same Hugging Face account before running. Its noncommercial research
-license also needs consideration before distributing outputs. Model downloads
+The default video model is [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct).
+PerceptionLM approval is unnecessary for the default configuration. Model downloads
 occur on the first GPU run; package setup does not download weights or start jobs.
 The isolated environment uses Transformers 5.5.4; existing grounding pins remain
 unchanged. The first run resolves dataset/model references and the official JEPA
@@ -89,7 +87,7 @@ captions are retried. Incompatible settings require another output directory.
 | `--max-segments` | `8` | Largest candidate count for the exported subtask cut |
 | `--silhouette-threshold` | `0.15` | Minimum score for a multi-subtask cut |
 | `--jepa-ref` | `main`, resolved once | Official JEPA repository ref |
-| `--video-model`, `--image-model` | PLM-3B, Qwen3-VL-8B-Instruct | Caption model IDs |
+| `--video-model`, `--image-model` | Qwen2.5-VL-7B-Instruct, Qwen3-VL-8B-Instruct | Caption model IDs |
 | `--video-revision`, `--image-revision` | `main`, resolved once | Model revisions |
 | `--dtype` | `bf16` | Inference dtype |
 
@@ -116,9 +114,30 @@ constant/weak evidence produces one root span. That cut is a robotics adaptation
 not a method claimed by Action100M. No gripper-event segmentation fallback occurs.
 
 Internal-node video frames are resized to 320×320 and supplied directly without
-processor resampling. Very short clips may repeat frame indices to satisfy the
+temporal resampling. Qwen2.5's processor aligns these to 308×308 for its 28-pixel
+patch/merge grid, an explicit spatial deviation from the paper. Source FPS,
+node duration and sampled indices determine the effective sparse-video FPS;
+Qwen2.5 represents timing using uniform spacing rather than per-frame timestamps.
+Very short clips may repeat frame indices to satisfy the
 requested count; the actual indices and timestamps are saved. Prompts describe
 images/videos neutrally; intended tasks and gripper values remain separate context.
+
+### Reusing JEPA results after changing video models
+
+Changing models requires a new output directory. To reuse completed segmentation
+from the previous PerceptionLM run, copy only its feature and segment caches.
+Keep source, JEPA and segmentation settings identical; incompatible caches are
+rejected. Existing PerceptionLM captions are not copied.
+
+```bash
+mkdir -p outputs/annotations_qwen25
+cp -r outputs/annotations/features outputs/annotations/segments outputs/annotations_qwen25/
+python -m robot101.data.annotate --episodes 0-2 --resume \
+  --output-dir outputs/annotations_qwen25 \
+  --push-to-hub --dst-repo-id kdaterao/so101_action_annotations
+```
+
+For aggregation, pass `--input-dir outputs/annotations_qwen25`.
 
 ## 2. Text-only annotation aggregation
 

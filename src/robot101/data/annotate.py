@@ -47,7 +47,7 @@ def build_parser():
     p.add_argument("--min-duration", type=float, default=0.5)
     p.add_argument("--max-segments", type=int, default=8)
     p.add_argument("--silhouette-threshold", type=float, default=0.15)
-    p.add_argument("--video-model", default="facebook/Perception-LM-3B")
+    p.add_argument("--video-model", default="Qwen/Qwen2.5-VL-7B-Instruct")
     p.add_argument("--image-model", default="Qwen/Qwen3-VL-8B-Instruct")
     p.add_argument("--video-revision", default="main")
     p.add_argument("--image-revision", default="main")
@@ -200,7 +200,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                 key = fingerprint(dict(segment=record["fingerprint"], node=node, model=run["resolved"][kind],
                                        model_id=args.video_model if kind == "video" else args.image_model,
                                        sample_frames=indices, tokens=args.max_caption_tokens, prompt="neutral-detailed-v1",
-                                       dtype=args.dtype, adapter="direct-frames-v1"))
+                                       dtype=args.dtype, adapter="direct-frames-metadata-v2"))
                 path = args.output_dir / "node_captions" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
                 cached = cached_json(path, key, args.resume)
                 if cached and cached.get("status") == "ok":
@@ -243,7 +243,9 @@ def caption_records(args, run, records, source, kind, worker_factory):
                         Image.fromarray(frame).save(image_root / f"f{i:06d}.jpg", quality=85)
                     if kind == "video":
                         frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
-                    requests.append(dict(frames=np.stack(frames)))
+                    requests.append(dict(frames=np.stack(frames), fps=record["fps"],
+                                         frame_indices=[i - node["start_frame"] for i in ids],
+                                         total_num_frames=node["end_frame"] - node["start_frame"]))
                     valid_jobs.append((node, ids, path, key))
                 if not valid_jobs:
                     continue

@@ -85,8 +85,9 @@ configs:
 
 # Hierarchical episode annotations
 
-Action100M-inspired annotation artifacts using V-JEPA 2.1, PerceptionLM,
-Qwen3-VL and optional Claude aggregation. This is an adaptation, not a reproduction.
+Action100M-inspired annotation artifacts using V-JEPA 2.1, configurable captioners
+(default Qwen2.5-VL video and Qwen3-VL image), and optional Claude aggregation.
+This is an adaptation, not a reproduction. Exact models are recorded in run.json.
 
 Each `train` row represents one retained hierarchy node. `selected_subtask` marks
 the controller cut; source frame intervals are half-open `[start_frame, end_frame)`.
@@ -101,7 +102,7 @@ LeRobot training datasets. No pixel grounding is performed by these commands.
 
 Missing, conflicting, truncated and unresolved outputs require human review.
 Desired completion conditions are not observed success labels. Check source-data
-and model licensing, including PerceptionLM's noncommercial terms, before reuse.
+and the recorded models' licensing before reuse.
 """
     api.upload_file(repo_id=repo_id, repo_type="dataset", path_or_fileobj=card.encode(),
                     path_in_repo="README.md", commit_message="Describe annotation dataset configurations")
