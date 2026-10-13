@@ -11,6 +11,7 @@ import time
 from robot101.data.utilities.annotation_tree import (
     atomic_json, cached_json, descendants, fingerprint, write_exports,
 )
+from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
 PROMPT_VERSION = "action100m-robotics-v1"
 STRING_FIELDS = ("brief_action", "detailed_action", "actor", "brief_caption", "detailed_caption")
@@ -242,7 +243,9 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true", help="Validate and save text request previews; no API calls")
     p.add_argument("--episodes", default=None, help="Optional selection, e.g. 0-25:5")
     p.add_argument("--grounding-diagnostics", type=Path, help="Optional JSONL keyed by source episode_index")
+    add_hub_arguments(p)
     args = p.parse_args(argv)
+    validate_hub_arguments(args)
     if min(args.rounds, args.concurrency, args.max_tokens) < 1:
         p.error("Rounds, concurrency and output token cap must be positive")
     from robot101.data.utilities.episode_helpers import _parse_episodes
@@ -315,6 +318,8 @@ def main(argv=None):
     atomic_json(args.output_dir / "summary.json", dict(episodes=len(records), failures=len(failures),
                 review=len(review), wall_seconds=time.perf_counter() - start, usage=usage))
     print(f"Saved annotations to {args.output_dir}; review={len(review)}, failures={len(failures)}")
+    if args.push_to_hub:
+        publish_annotations(args.output_dir, args.dst_repo_id, "aggregation", private=args.hub_private)
 
 
 if __name__ == "__main__":

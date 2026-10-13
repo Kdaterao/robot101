@@ -8,8 +8,9 @@ using descendant and root context. It substitutes V-JEPA **2.1 ViT-L**, Qwen3-VL
 PerceptionLM-3B remains the video captioner.
 
 These commands annotate existing LeRobot episodes. They do **not** run Molmo,
-TAPIR, or SAM 2, modify the grounding preprocessor, train models, or upload a
-dataset. Original videos remain clean. JEPA runs only in offline data creation.
+TAPIR, or SAM 2, modify the grounding preprocessor, or train models. Original
+videos remain clean. JEPA runs only in offline data creation. Outputs stay local
+unless `--push-to-hub --dst-repo-id OWNER/DATASET` is supplied.
 
 ## Ubuntu / RTX A6000 setup
 
@@ -151,6 +152,34 @@ IDs and bounds are immutable; suggestions never rewrite them. Optional
 `episode_index` for later integration. It does not invoke grounding.
 
 ## Artifacts and validation
+
+### Publish to Hugging Face
+
+Both commands support `--push-to-hub`, using `HF_TOKEN` or your saved `hf auth
+login`. They create the destination dataset if needed and upload at the end:
+
+```bash
+python -m robot101.data.annotate \
+  --episodes 0-9 --output-dir outputs/annotations_test \
+  --push-to-hub --dst-repo-id kdaterao/so101_action_annotations
+
+python -m robot101.data.aggregate_annotations \
+  --input-dir outputs/annotations_test --output-dir outputs/standardized_test \
+  --push-to-hub --dst-repo-id kdaterao/so101_action_annotations
+```
+
+The same repository can contain both stages: `captioning/` and `aggregation/`.
+Each has a flat `dataset_rows.jsonl` for the Hub viewer, plus full sidecars and
+provenance. Choose the `captioning` or `aggregation` dataset configuration to
+load rows. Use `selected_subtask` to filter the exported controller cut.
+Videos and robot actions are referenced by source dataset/revision and episode,
+not copied; this is an annotation dataset, not a grounded LeRobot dataset.
+
+Add `--hub-private` to create a new private repository; existing visibility is
+unchanged. API dry runs do not upload and reject `--push-to-hub`. Upload failures
+leave local results intact. Rerun with the same processing arguments plus
+`--resume --push-to-hub --dst-repo-id ...` to retry upload without reprocessing
+completed nodes. Hub options do not invalidate inference caches.
 
 GPU output:
 

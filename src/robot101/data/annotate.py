@@ -17,6 +17,7 @@ from robot101.data.utilities.annotation_tree import (
 )
 from robot101.data.utilities.episode_helpers import DEFAULT_SRC, _load_lerobot, _parse_episodes
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
+from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
 
 class ModelInitializationError(RuntimeError):
@@ -54,6 +55,7 @@ def build_parser():
     p.add_argument("--video-batch-size", type=int, default=1)
     p.add_argument("--image-batch-size", type=int, default=1)
     p.add_argument("--max-caption-tokens", type=int, default=1024)
+    add_hub_arguments(p)
     return p
 
 
@@ -71,7 +73,8 @@ def load_source_episode(dataset_class, repo_id, episode, root, revision, backend
 def resolve_run(args):
     """Freeze mutable source/model refs once; resume uses this same snapshot."""
     requested = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
-                 if k not in {"episodes", "stage", "resume", "output_dir", "download_workers"}}
+                 if k not in {"episodes", "stage", "resume", "output_dir", "download_workers",
+                              "push_to_hub", "dst_repo_id", "hub_private"}}
     path = args.output_dir / "run.json"
     key = fingerprint(requested)
     existing = cached_json(path, key, args.resume)
@@ -267,6 +270,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    validate_hub_arguments(args)
     for name in ("download_workers", "decode_batch_size", "sample_step", "jepa_batch_size", "max_segments",
                  "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens"):
         if getattr(args, name) < 1:
@@ -353,6 +357,8 @@ def main(argv=None):
                     peak_cpu_ram_mib=peak_ram_mib,
                     peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else None))
     print(f"Saved caption trees and reports to {args.output_dir}")
+    if args.push_to_hub:
+        publish_annotations(args.output_dir, args.dst_repo_id, "captioning", private=args.hub_private)
 
 
 if __name__ == "__main__":
