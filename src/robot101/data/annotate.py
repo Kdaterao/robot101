@@ -136,7 +136,7 @@ def segment_episode(args, run, episode, source, worker):
         ds = source(episode)
         download_seconds = perf_counter() - start
         start = perf_counter()
-        data = load_episode_metadata(ds, [args.camera])
+        data = load_episode_metadata(ds, [args.camera], preserve_auxiliary=False)
         metadata_seconds = perf_counter() - start
         start = perf_counter()
         ids = sampled_frames(data["n"], args.sample_step)
@@ -211,7 +211,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                 ds = source(record["episode_index"])
                 record.setdefault("caption_timings", {})[f"{kind}_source_load_seconds"] = perf_counter() - start
                 start = perf_counter()
-                data = load_episode_metadata(ds, [args.camera])
+                data = load_episode_metadata(ds, [args.camera], preserve_auxiliary=False)
                 record["caption_timings"][f"{kind}_metadata_seconds"] = perf_counter() - start
                 start = perf_counter()
                 indices = sorted({i for _, ids, _, _ in jobs for i in ids})

@@ -42,15 +42,22 @@ def _source_value(value, feature):
     return array.astype(np.dtype(dtype)).reshape(tuple(feature['shape'])).copy()
 
 
-def load_episode_metadata(ds, cameras):
-    """Read state/actions/task text without triggering per-frame video seeks."""
+def load_episode_metadata(ds, cameras, *, preserve_auxiliary=True):
+    """Read state/actions/task text without triggering per-frame video seeks.
+
+    Annotation reads only the requested camera and does not rewrite robot data,
+    so it can opt out of collecting writer auxiliary fields. Video features are
+    decoded from their video files, not required as parquet metadata columns.
+    Grounding writers keep the default preservation behavior.
+    """
     start = perf_counter()
     rows = ds.hf_dataset
     n = len(rows)
     if not n:
         raise ValueError('empty episode')
     from lerobot.utils.constants import DEFAULT_FEATURES
-    auxiliary = source_auxiliary_fields(ds.meta.features, cameras, DEFAULT_FEATURES)
+    auxiliary = (source_auxiliary_fields(ds.meta.features, cameras, DEFAULT_FEATURES)
+                 if preserve_auxiliary else {})
     states, actions, tasks, timestamps, episodes, extras = [], [], [], [], [], []
     masks = {cam: [] for cam in cameras}
     for row in rows:
