@@ -275,6 +275,15 @@ def caption_records(args, run, records, source, kind, worker_factory):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    from robot101.data.utilities.hardware_usage import HardwareUsage
+    usage = HardwareUsage()
+    try:
+        _run(args, usage)
+    finally:
+        usage.finish(args.output_dir)
+
+
+def _run(args, usage):
     validate_hub_arguments(args)
     for name in ("download_workers", "decode_batch_size", "sample_step", "jepa_batch_size", "max_segments",
                  "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens"):
@@ -363,6 +372,7 @@ def main(argv=None):
                     retained_nodes=sum(len(r["nodes"]) for r in records), wall_seconds=perf_counter() - start,
                     peak_cpu_ram_mib=peak_ram_mib,
                     peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else None))
+    usage.finish(args.output_dir)
     print(f"Saved caption trees and reports to {args.output_dir}")
     if args.push_to_hub:
         publish_annotations(args.output_dir, args.dst_repo_id, "captioning", private=args.hub_private)

@@ -105,6 +105,19 @@ the script does not silently change batch size. Use another output directory
 when changing settings. `--video-frames 16` and smaller token caps are explicit
 efficiency deviations from the paper's captioning recipe.
 
+Each annotation invocation samples hardware usage approximately once per second.
+At completion or interruption it prints peak process-tree CPU usage, host CPU
+usage, process-tree RAM, and per-GPU utilization/VRAM, and writes
+`hardware_usage.json`. Successful runs also include these measurements in
+`summary.json` and upload the report with annotation artifacts.
+Process CPU can exceed 100%: 200% means approximately two logical cores. NVIDIA
+measurements are whole-device usage, including other jobs, rather than this
+process alone. Missing `nvidia-smi` measurements remain unavailable. Sampled peaks
+may miss brief spikes; summed process RSS can double-count shared memory.
+Reports describe the current invocation, including cache reuse, and are replaced
+on resume. The existing PyTorch peak-allocation metric remains separate from
+device-wide VRAM.
+
 Ward clustering links only neighboring spans. Spatial pooling and overlap
 averaging do not add feature normalization. Tubelet features are assigned to
 their real sampled frames, ignoring padded positions; padding still provides
