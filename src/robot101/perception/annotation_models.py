@@ -57,7 +57,12 @@ class JEPAEncoder:
         torch = self.torch
         inputs = torch.stack([torch.stack([self.transform(Image.fromarray(frame)) for frame in clip], dim=1)
                               for clip in clips]).to(device=self.device, dtype=self.dtype)
-        with torch.inference_mode():
+        # RoPE position arithmetic promotes Q/K to FP32 in upstream V-JEPA
+        # 2.1 while V stays BF16/FP16. Autocast aligns SDPA's inputs and the
+        # following linear layers without modifying upstream model code.
+        with torch.inference_mode(), torch.autocast(
+                device_type=torch.device(self.device).type, dtype=self.dtype,
+                enabled=self.dtype != torch.float32):
             output = self.model(inputs)
         if not torch.is_tensor(output):
             raise ValueError("JEPA encoder must return its final B,N,D token tensor")

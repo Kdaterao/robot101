@@ -117,7 +117,7 @@ def segment_episode(args, run, episode, source, worker):
         "src_repo_id", "camera", "jepa_ref", "sample_step", "window_frames", "window_stride", "dtype", "seed")}
     feature_key = fingerprint(dict(config=feature_config, source=run["resolved"]["source"],
                                    jepa=run["resolved"]["jepa"], checkpoint_url=JEPA_CHECKPOINT_URL,
-                                   episode=episode, adapter="jepa-tubelet-v2"))
+                                   episode=episode, adapter="jepa-tubelet-amp-v3"))
     segment_key = fingerprint(dict(features=feature_key, min_duration=args.min_duration,
                                    max_segments=args.max_segments, threshold=args.silhouette_threshold, version=SCHEMA_VERSION))
     path = args.output_dir / "segments" / f"{prefix}.json"
@@ -324,12 +324,14 @@ def main(argv=None):
                 if "exist" in str(exc).lower() or "incompatible" in str(exc).lower():
                     raise
                 failures.append(dict(episode_index=episode, stage="segment", error=str(exc)))
+                print(f"[skip episode {episode}] {exc}", flush=True)
             except ModelInitializationError as exc:
                 failures.append(dict(episode_index=episode, stage="segment", error=str(exc)))
                 atomic_json(args.output_dir / "failures.json", failures)
                 raise
             except (OSError, RuntimeError) as exc:
                 failures.append(dict(episode_index=episode, stage="segment", error=str(exc)))
+                print(f"[skip episode {episode}] {exc}", flush=True)
                 if "out of memory" in str(exc).lower():
                     atomic_json(args.output_dir / "failures.json", failures)
                     raise
