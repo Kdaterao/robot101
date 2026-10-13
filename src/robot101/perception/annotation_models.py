@@ -6,6 +6,10 @@ import numpy as np
 
 from robot101.data.utilities.annotation_tree import pool_tokens
 
+JEPA_CHECKPOINT_URL = (
+    "https://dl.fbaipublicfiles.com/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt"
+)
+
 
 def release(worker):
     """Release all model references before the following model pass."""
@@ -26,8 +30,19 @@ class JEPAEncoder:
         self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[dtype]
         encoder, predictor = torch.hub.load(
             f"facebookresearch/vjepa2:{ref}", "vjepa2_1_vit_large_384",
-            pretrained=True, trust_repo=True, skip_validation=True)
+            pretrained=False, trust_repo=True, skip_validation=True)
         del predictor
+        # Some upstream commits point the Hub weight downloader at localhost
+        # for testing. Construct the architecture without downloading and use
+        # the checkpoint explicitly published in Meta's README instead.
+        checkpoint = torch.hub.load_state_dict_from_url(
+            JEPA_CHECKPOINT_URL, map_location="cpu", weights_only=False)
+        if not isinstance(checkpoint, dict) or "ema_encoder" not in checkpoint:
+            raise ValueError("Official V-JEPA 2.1 ViT-L checkpoint is missing ema_encoder")
+        state = {name.replace("module.", "").replace("backbone.", ""): tensor
+                 for name, tensor in checkpoint["ema_encoder"].items()}
+        encoder.load_state_dict(state, strict=True)
+        del state, checkpoint
         self.model = encoder.eval().to(device=device, dtype=self.dtype)
         self.tubelet = self.model.tubelet_size
         self.patch = self.model.patch_size

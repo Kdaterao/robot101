@@ -111,11 +111,13 @@ def save_features(path, features, ids, counts, key, metadata):
 
 
 def segment_episode(args, run, episode, source, worker):
+    from robot101.perception.annotation_models import JEPA_CHECKPOINT_URL
     prefix = f"ep{episode:06d}"
     feature_config = {key: run["requested"][key] for key in (
         "src_repo_id", "camera", "jepa_ref", "sample_step", "window_frames", "window_stride", "dtype", "seed")}
     feature_key = fingerprint(dict(config=feature_config, source=run["resolved"]["source"],
-                                   jepa=run["resolved"]["jepa"], episode=episode, adapter="jepa-tubelet-v1"))
+                                   jepa=run["resolved"]["jepa"], checkpoint_url=JEPA_CHECKPOINT_URL,
+                                   episode=episode, adapter="jepa-tubelet-v2"))
     segment_key = fingerprint(dict(features=feature_key, min_duration=args.min_duration,
                                    max_segments=args.max_segments, threshold=args.silhouette_threshold, version=SCHEMA_VERSION))
     path = args.output_dir / "segments" / f"{prefix}.json"
@@ -174,6 +176,7 @@ def segment_episode(args, run, episode, source, worker):
     tree = build_tree(features, ids, metadata["n_frames"], run["fps"], min_duration=args.min_duration,
                       max_segments=args.max_segments, threshold=args.silhouette_threshold)
     record = dict(tree, schema_version=SCHEMA_VERSION, fingerprint=segment_key,
+                  jepa_checkpoint_url=JEPA_CHECKPOINT_URL,
                   feature_fingerprint=feature_key, episode_index=episode, camera=args.camera,
                   source_repo_id=args.src_repo_id, source_revision=run["resolved"]["source"],
                   fps=run["fps"], bounds="half_open_source_frames", **metadata,

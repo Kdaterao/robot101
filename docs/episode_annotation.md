@@ -28,6 +28,9 @@ occur on the first GPU run; package setup does not download weights or start job
 The isolated environment uses Transformers 5.5.4; existing grounding pins remain
 unchanged. The first run resolves dataset/model references and the official JEPA
 repository ref to immutable commits in `run.json`. Resume uses those same commits.
+The encoder checkpoint is downloaded explicitly from Meta's published
+`https://dl.fbaipublicfiles.com/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt` URL;
+the adapter does not use upstream testing URLs such as `localhost:8300`.
 
 ## 1. GPU segmentation and captioning
 
