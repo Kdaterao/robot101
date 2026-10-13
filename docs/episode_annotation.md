@@ -6,6 +6,9 @@ retained leaves, video captions on retained internal nodes, and text aggregation
 using descendant and root context. It substitutes V-JEPA **2.1 ViT-L**, Qwen3-VL
 **8B**, and Claude **Haiku** for the paper's encoder/image/aggregation models.
 PerceptionLM-3B remains the video captioner.
+Its timm vision wrapper uses the `eager` attention configuration while its
+language model uses SDPA; Qwen uses SDPA. This avoids passing an unsupported
+SDPA configuration to the timm wrapper.
 
 These commands annotate existing LeRobot episodes. They do **not** run Molmo,
 TAPIR, or SAM 2, modify the grounding preprocessor, or train models. Original

@@ -76,14 +76,19 @@ class JEPAEncoder:
 class Captioner:
     def __init__(self, model_id, revision, kind, device="cuda", dtype="bf16"):
         import torch
-        from transformers import AutoProcessor, AutoModelForImageTextToText
+        from transformers import AutoConfig, AutoProcessor, AutoModelForImageTextToText
         self.torch, self.kind, self.device = torch, kind, device
         self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[dtype]
         self.processor = AutoProcessor.from_pretrained(model_id, revision=revision)
         self.processor.tokenizer.padding_side = "left"
+        config = AutoConfig.from_pretrained(model_id, revision=revision)
+        # PerceptionLM's timm wrapper rejects a propagated SDPA setting.
+        # Keep SDPA on the language model and let timm manage vision attention.
+        attention = ({"": "eager", "vision_config": "eager", "text_config": "sdpa"}
+                     if config.model_type == "perception_lm" else "sdpa")
         self.model = AutoModelForImageTextToText.from_pretrained(
-            model_id, revision=revision, torch_dtype=self.dtype,
-            attn_implementation="sdpa", low_cpu_mem_usage=True).eval().to(device)
+            model_id, revision=revision, config=config, torch_dtype=self.dtype,
+            attn_implementation=attention, low_cpu_mem_usage=True).eval().to(device)
         if kind == "video":
             # The HF checkpoint's timm tower can have a fixed 448px grid.
             # Adapt its positional embeddings/grid, not just its processor,
