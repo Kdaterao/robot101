@@ -32,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="Only detect gripper stages; do not load models or write")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--push-to-hub", action="store_true")
+    p.add_argument("--debug-overlays", action="store_true",
+                   help="Write debug camera videos with SAM 2 masks and grounding dots, without heatmaps; use a separate destination")
     p.add_argument("--first-primitive", default="grasp", choices=["grasp", "release"])
     p.add_argument("--max-stages", type=int, default=32)
     p.add_argument("--min-stage-frames", type=int, default=1, help="Minimum gap between event boundaries; preserves quick reversals")

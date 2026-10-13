@@ -27,6 +27,27 @@ mv tapnet/checkpoints/causal_bootstapir_checkpoint.pt.part \
 Skip this step if the checkpoint already exists. The Molmo2 base weights and
 connector download automatically into the Hugging Face cache on first use.
 
+## Upload a debug dataset with masks and dots
+
+```bash
+python -m robot101.data.preprocess \
+  --episodes 0 --dst-repo-id kdaterao/so101_sam2_debug_test \
+  --device cuda --tapir-frame-batch-size 256 \
+  --debug-overlays --push-to-hub
+```
+
+Use a separate destination for this test dataset. Magenta shows the SAM 2
+POV gripper mask during existing clustering windows, including the next-subtask
+extension. Green dots show current grounding points; cyan dots show previous
+subtask points during their overlap. Third-person fallback dots stay stationary.
+There are no heatmaps. Frame labels distinguish missing masks requiring review
+from frames outside the mask window. Point and mask sidecars are retained.
+
+The flag defaults to off, producing clean videos for training. Debug videos are
+marked in dataset metadata and the Hub dataset card. `--resume` cannot mix clean
+and debug modes in one destination. This flag does not extend SAM 2 propagation
+or change inference inputs.
+
 ## Process one episode and upload it, with telemetry
 
 ```bash
@@ -150,7 +171,8 @@ using their proximity to the gripper at the exact endpoint, with the configured
 proximity threshold and ambiguity margin. If the gripper track is lost, Molmo
 may re-detect it only at that exact endpoint for association. When selection
 fails, a gripper detected on that exact endpoint may supply `gripper_fallback`,
-which is tracked backward through the subtask.
+which remains fixed at those pixel coordinates throughout the subtask and
+any configured transition overlap. No TAPIR tracking is run for the fallback.
 No nearby-frame substitution or POV fallback is allowed. Unresolved
 third-person results retain `manual_review_required` for the existing point
 correction viewer.

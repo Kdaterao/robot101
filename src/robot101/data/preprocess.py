@@ -6,7 +6,7 @@ across demonstrations. Points are selected from their stage-tail tracks and
 then tracked backward through each full stage. SAM 2 excludes the POV gripper
 and weights nearby candidates. Third-person candidates are grounded at the
 subtask start, tracked forward, and selected by endpoint gripper proximity.
-Unresolved goals can use an exact-end-frame gripper fallback tracked backward. Diagnostics are
+Unresolved goals can use a stationary exact-end-frame gripper snapshot. Diagnostics are
 written beside the LeRobot output in ``point_tracks/``.
 """
 
@@ -44,6 +44,7 @@ from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT
 from robot101.data.utilities.gripper_filtering import prepare_gripper_filter
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
+from robot101.data.utilities.debug_overlays import DebugOverlayRenderer, check_output_mode, write_output_mode
 from robot101.data.utilities.validation import (EpisodeShapeError, validate_episode_shapes,
                                  record_skipped_episode, install_statistics_validation)
 from robot101.perception.motion_plan import (
@@ -462,17 +463,15 @@ def _ground_and_track_camera(
         points = endpoint_gripper if endpoint_gripper is not None else ground(GRIPPER_QUERY, stage.end)
         if not len(points):
             return unresolved("endpoint_gripper_grounding_failed")
-        try:
-            tracks, visible, _, _ = tapir.track_video(
-                [clip[i] for i in indices[::-1]], points, query_frame_index=0)
-            tracks, visible = _expand_sparse_tracks(tracks[:, ::-1], visible[:, ::-1], indices, stage_masks)
-            keep = visible[:, -1] & np.isfinite(tracks[:, -1]).all(1)
-            if not keep.any():
-                return unresolved("tracker_lost_endpoint_gripper")
-            return finish(tracks[keep], visible[keep], points[keep], "gripper_fallback",
-                          GRIPPER_QUERY, stage.end, "backward")
-        except Exception as exc:
-            return unresolved(f"endpoint_tracking_failed:{exc}")
+        # The endpoint gripper position is a fixed spatial goal, not a
+        # trajectory of the gripper. Keep it stationary on real camera frames.
+        tracks = np.repeat(points[:, None, :], len(clip), axis=1)
+        visible = np.broadcast_to(stage_masks, tracks.shape[:2]).copy()
+        result = finish(tracks, visible, points, "gripper_fallback",
+                        GRIPPER_QUERY, stage.end, "static")
+        result.update(fallback_mode="static_endpoint_snapshot", snapshot_frame=int(stage.end),
+                      snapshot_source="exact_endpoint_gripper", tracking_sample_frames=[])
+        return result
 
     if not stage_masks[0]:
         return fallback("missing_start_frame")
@@ -578,6 +577,10 @@ def main() -> None:
     skip_path = dst_root / "point_tracks" / "skipped_episodes.jsonl"
     dst = None
     if not args.dry_run:
+        try:
+            check_output_mode(dst_root, args.debug_overlays)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         features = _clone_features(dict(src_meta.features), DEFAULT_FEATURES)
         if args.resume and dst_root.exists():
             if recover_empty_destination(dst_root) is not None:
@@ -600,6 +603,7 @@ def main() -> None:
                 use_videos=True,
             )
         install_statistics_validation(dst.meta.features)
+        write_output_mode(dst_root, args.debug_overlays)
 
     if args.dry_run:
         for ep_idx in episode_ids:
@@ -993,13 +997,23 @@ def main() -> None:
                 prior = previous_camera_points[cam]
                 if transition_frames > 0 and prior is not None:
                     try:
-                        carry_tracks, carry_vis, carry_points, raw_carry_vis = _track_transition_points(
-                            tapir, data["frames"][cam], data["masks"][cam],
-                            prior["frame"], st.start, transition_frames, prior["points"],
-                            fps=fps, tracking_fps=args.third_person_tracking_fps,
-                            visibility_gap_seconds=args.third_person_visibility_gap_seconds,
-                            label=f"ep{ep_idx}/stage{si}/{cam}/transition",
-                        )
+                        if prior.get("source") == "gripper_fallback":
+                            carry_points = prior["points"]
+                            length = min(transition_frames, n-st.start)
+                            carry_tracks = np.repeat(carry_points[:, None, :], length, axis=1)
+                            carry_vis = np.broadcast_to(
+                                data["masks"][cam][st.start:st.start+length], carry_tracks.shape[:2]).copy()
+                            raw_carry_vis = carry_vis.copy()
+                            transition.update(fallback_mode="static_endpoint_snapshot",
+                                              snapshot_frame=prior["frame"])
+                        else:
+                            carry_tracks, carry_vis, carry_points, raw_carry_vis = _track_transition_points(
+                                tapir, data["frames"][cam], data["masks"][cam],
+                                prior["frame"], st.start, transition_frames, prior["points"],
+                                fps=fps, tracking_fps=args.third_person_tracking_fps,
+                                visibility_gap_seconds=args.third_person_visibility_gap_seconds,
+                                label=f"ep{ep_idx}/stage{si}/{cam}/transition",
+                            )
                         transition.update(
                             status="ok" if bool(carry_vis.any()) else "tracker_lost",
                             seed_points=carry_points.tolist(), tracks=carry_tracks.tolist(),
@@ -1016,6 +1030,7 @@ def main() -> None:
                     valid = result_vis[:, -1] & np.isfinite(result_tracks[:, -1]).all(axis=1)
                     previous_camera_points[cam] = {
                         "frame": st.end,
+                        "source": result.get("source"),
                         "points": result_tracks[valid, -1].copy(),
                     }
                 else:
@@ -1089,12 +1104,13 @@ def main() -> None:
         sidecar_root.mkdir(parents=True, exist_ok=True)
         sidecar = sidecar_root / f"ep{ep_idx:06d}.json"
         sidecar.write_text(json.dumps({"episode": ep_idx, "destination_episode": int(dst.meta.total_episodes),
+                                      "debug_overlays": args.debug_overlays,
                                       "task": task, "entities": entities,
                                       "heatmap": {"sigma": args.heatmap_sigma, "alpha": args.heatmap_alpha},
                                       "subtasks": episode_records}, indent=2) + "\n", encoding="utf-8")
 
-        # Keep dataset videos clean. Tracked coordinates and visibility are in
-        # the episode sidecar; --viz-dir can render separate review images.
+        # Draw only on copies at output time; model inputs remain clean.
+        debug_renderer = DebugOverlayRenderer(episode_records, sidecar_root) if args.debug_overlays else None
         for t in range(n):
             frame = {
                 **data["extras"][t],
@@ -1103,14 +1119,16 @@ def main() -> None:
                 "task": data["tasks"][t] or task or "molmo_point_grounded_preprocess",
             }
             if _cam_key(CAMERA_WRIST) in dst.meta.features:
-                frame[_cam_key(CAMERA_WRIST)] = _rgb_to_dataset(wrist_frames[t])
+                rgb = debug_renderer.render(wrist_frames[t], t, CAMERA_WRIST) if debug_renderer else wrist_frames[t]
+                frame[_cam_key(CAMERA_WRIST)] = _rgb_to_dataset(rgb)
                 if _mask_key(CAMERA_WRIST) in dst.meta.features:
                     frame[_mask_key(CAMERA_WRIST)] = np.asarray([data["masks"][CAMERA_WRIST][t]], dtype=bool)
             for cam in CAMERAS_3P:
                 key = _cam_key(cam)
                 if key not in dst.meta.features:
                     continue
-                frame[key] = _rgb_to_dataset(data["frames"][cam][t])
+                rgb = debug_renderer.render(data["frames"][cam][t], t, cam) if debug_renderer else data["frames"][cam][t]
+                frame[key] = _rgb_to_dataset(rgb)
                 if _mask_key(cam) in dst.meta.features:
                     frame[_mask_key(cam)] = np.asarray([data["masks"][cam][t]], dtype=bool)
             dst.add_frame(frame)
@@ -1125,7 +1143,28 @@ def main() -> None:
         if int(dst.meta.total_episodes) == 0:
             print(f"No episodes written; no dataset upload. Skip report: {skip_path}", flush=True)
         if args.push_to_hub and int(dst.meta.total_episodes) > 0:
-            dst.push_to_hub(branch="main", tags=["robotics", "smolvla", "tapnet", args.molmo_backend], license="apache-2.0", push_videos=True)
+            tags = ["robotics", "smolvla", "tapnet", args.molmo_backend]
+            if args.debug_overlays:
+                tags.append("debug-overlays")
+            dst.push_to_hub(branch="main", tags=tags, license="apache-2.0", push_videos=True)
+            from huggingface_hub import HfApi
+
+            api = HfApi()
+            api.upload_file(path_or_fileobj=str(dst_root / "meta" / "grounding_output.json"),
+                            path_in_repo="meta/grounding_output.json", repo_id=args.dst_repo_id,
+                            repo_type="dataset", commit_message="Record grounding video output mode")
+            if args.debug_overlays:
+                card = ("---\nlicense: apache-2.0\ntags:\n- robotics\n- debug-overlays\n---\n\n"
+                        "# Grounding debug dataset\n\n"
+                        "These videos contain debug overlays and are intended for inspection. "
+                        "Use clean preprocessing output for training.\n\n"
+                        "Magenta: SAM 2 POV gripper mask within clustering windows. "
+                        "Green: current grounding points. Cyan: previous-subtask points. "
+                        "No heatmaps are rendered. Missing masks are marked for review. "
+                        "Point tracks and mask sidecars are in `point_tracks/`.\n")
+                api.upload_file(path_or_fileobj=card.encode(), path_in_repo="README.md",
+                                repo_id=args.dst_repo_id, repo_type="dataset",
+                                commit_message="Mark dataset videos as debugging overlays")
             sidecar_root = args.sidecar_dir or (dst_root / "point_tracks")
             if sidecar_root.is_dir():
                 from huggingface_hub import HfApi

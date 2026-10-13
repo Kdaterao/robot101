@@ -6,12 +6,13 @@ cd "$ROOT"
 PROFILE=grounded
 usage() {
   cat <<'HELP'
-Usage: bash scripts/setup/linux_setup.sh [--profile grounded|molmo2|robot|all]
+Usage: bash scripts/setup/linux_setup.sh [--profile grounded|molmo2|annotation|robot|all]
 
   grounded  Molmo2 inference + TAPIR + video preprocessing (default; .venv-grounded)
   molmo2    Molmo2 connector training dependencies (.venv-molmo2)
   robot     Robot control and SmolVLA dependencies (.venv)
-  all       Prepare all three isolated environments
+  annotation V-JEPA 2.1 + PLM/Qwen captions + Claude aggregation (.venv-annotation)
+  all       Prepare all four isolated environments
 
 Set SKIP_APT=1 to skip Ubuntu system packages when already installed.
 Model checkpoint downloads and job execution are documented in docs/.
@@ -29,7 +30,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$PROFILE" in
-  grounded|molmo2|robot|all) ;;
+  grounded|molmo2|annotation|robot|all) ;;
   *) echo "Unknown profile: $PROFILE" >&2; usage >&2; exit 2 ;;
 esac
 if [[ "$(uname -s)" != Linux ]]; then
@@ -152,13 +153,42 @@ fi
 echo 'Package setup complete. Run commands: README.md'
 }
 
+setup_annotation() {
+git submodule update --init lerobot
+ENV_DIR="${ROOT}/.venv-annotation"
+if [[ ! -x "$ENV_DIR/bin/python" ]]; then
+  uv venv --seed --python 3.12 "$ENV_DIR"
+fi
+uv pip install --python "$ENV_DIR/bin/python" torch==2.10.0 torchvision==0.25.0 \
+  --index-url https://download.pytorch.org/whl/cu130
+"$ENV_DIR/bin/python" scripts/install_requirements.py --profile annotation --installer uv \
+  --pin torch==2.10.0 --pin torchvision==0.25.0
+uv pip install --python "$ENV_DIR/bin/python" --no-deps torchcodec==0.10.0 \
+  --index-url https://download.pytorch.org/whl/cpu
+"$ENV_DIR/bin/python" - <<'PY'
+import torch
+from transformers import PerceptionLMForConditionalGeneration, Qwen3VLForConditionalGeneration
+from robot101.data.annotate import build_parser
+from robot101.data.utilities.episode_helpers import _load_lerobot
+from anthropic import Anthropic
+_load_lerobot()
+if not torch.cuda.is_available():
+    raise SystemExit('CUDA unavailable: check the VM NVIDIA driver.')
+print('Annotation environment ready on', torch.cuda.get_device_name(0))
+PY
+echo 'Next: source .venv-annotation/bin/activate && hf auth login'
+echo 'Model access and run commands: docs/episode_annotation.md'
+}
+
 case "$PROFILE" in
   grounded) setup_grounded ;;
   molmo2) setup_molmo2 ;;
   robot) setup_robot ;;
+  annotation) setup_annotation ;;
   all)
     setup_grounded
     setup_molmo2
     setup_robot
+    setup_annotation
     ;;
 esac

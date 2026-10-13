@@ -15,16 +15,20 @@ steps in the guides.
 | Robot control / SmolVLA | `scripts/setup/linux_setup.sh --profile robot` | [Project README](../README.md) |
 | Older TAPIR workflows | `scripts/setup/linux_setup.sh` / `windows_setup.ps1` | [TAPIR commands](legacy/TAPNET_COMMANDS.md) |
 | Point label collection | `requirements.txt` labeling profile | [Molmo gripper point dataset](molmo_gripper_point_data.md) |
+| JEPA segmentation and hierarchical captions | `scripts/setup/linux_setup.sh --profile annotation` | [Episode annotation](episode_annotation.md) |
 
 Short workflow guides:
 
 - [Molmo gripper point dataset](molmo_gripper_point_data.md)
 - [Grounded robot training data](grounded_training_data.md)
 - [SAM 2 gripper filtering and later TAPNext++ migration](sam2_contact_point_filtering.md)
+- [Future JEPA subtask segmentation experiment](jepa_subtask_segmentation.md)
+- [Two-day dataset pipeline MVP plan](dataset_pipeline_mvp_plan.md)
+- [Episode segmentation and annotation commands](episode_annotation.md)
 
 There are two setup entrypoints: `linux_setup.sh` for Ubuntu and
 `windows_setup.ps1` for native Windows PowerShell. Linux defaults to preprocessing;
-use `--profile molmo2`, `--profile robot`, or `--profile all` to prepare the other
+use `--profile molmo2`, `--profile annotation`, `--profile robot`, or `--profile all` to prepare the other
 environments. They stay isolated because their dependency versions differ.
 Windows keeps the original lean TAPIR/CUDA setup in `.venv`. All repository-owned dependency sets live in one `requirements.txt`, including
 `einops` and `einshape`. Select a profile with:
@@ -34,7 +38,7 @@ python scripts/install_requirements.py --profile viewer
 ```
 
 Profiles: `grounded`, `viewer`, `tapnet`, `robot`, `labeling`,
-`molmo-grounding`. The installers select their profiles
+`molmo-grounding`, `annotation`. The installers select their profiles
 for you. A plain `pip install -r requirements.txt` installs `grounded`.
 Legacy Transformers pins remain in separate environments.
 The old generated robot requirements are replaced by LeRobot's declared extras;
@@ -49,7 +53,7 @@ source .venv-grounded/bin/activate
 hf auth login
 ```
 
-To prepare preprocessing, Molmo2 training and robot environments together:
+To prepare preprocessing, annotation, Molmo2 training and robot environments together:
 
 ```bash
 bash scripts/setup/linux_setup.sh --profile all

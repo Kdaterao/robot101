@@ -84,9 +84,10 @@ replaces the earlier episode-end-only restriction and applies to intermediate
 and final subtasks alike.
 
 - Never substitute a gripper detection from a nearby frame or another camera.
-- Seed the detected endpoint point and track it backward through its subtask
-  using the existing third-person tracking settings, including configurable
-  sparse tracking FPS. Preserve the existing output transition overlap.
+- Freeze the detected endpoint point at the same pixel coordinates throughout
+  its subtask and configured transition overlap. Do not track the gripper
+  fallback with TAPIR; it represents a fixed spatial goal. Hide its overlay on
+  missing camera frames. Object candidates still use sparse forward tracking.
 - Record the source as `gripper_fallback`, keeping it distinct from object
   grounding. A gripper fallback is not a verified object contact label.
 - If the endpoint image is missing, or neither object nor gripper grounding
@@ -124,7 +125,7 @@ Retain existing point-sidecar fields while adding the new metadata.
    or beyond the default radius. Missing masks must require review.
 4. **Check third-person fallback.** Cover intermediate and final subtasks,
    missing endpoint images, failed gripper detections, and valid object points.
-   Confirm exact-frame seeding, backward tracking, `gripper_fallback`
+   Confirm exact-frame detection, stationary coordinates, `gripper_fallback`
    provenance, and absence of POV fallback.
 5. **Inspect saved data.** Confirm clean videos, preserved transition overlap,
    aligned mask/point sidecars, and explicit unresolved/review status. Compare

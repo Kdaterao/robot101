@@ -134,7 +134,9 @@ class GroundingTests(unittest.TestCase):
             out, calls, seen = self.run_ground({'Point to the robot gripper.': [[5, 5]]}, end=end)
             self.assertEqual(out['source'], 'gripper_fallback')
             self.assertEqual(calls[-1], (end, 'Point to the robot gripper.'))
-            self.assertEqual(seen[0], end)
+            self.assertFalse(seen)
+            self.assertEqual(out['fallback_mode'], 'static_endpoint_snapshot')
+            self.assertTrue((np.asarray(out['tracks']) == [5, 5]).all())
             self.assertEqual(out['seed_frame'], end)
 
     def test_missing_endpoint_or_detection_requires_review(self):
