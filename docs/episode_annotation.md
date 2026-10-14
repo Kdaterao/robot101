@@ -79,9 +79,6 @@ captions are retried. Incompatible settings require another output directory.
 | `--window-frames`, `--window-stride` | `64`, `8` | Sampled frames per window and stride; even multiples, stride ≤ window |
 | `--jepa-batch-size` | `1` | Concurrent encoder windows |
 | `--video-batch-size`, `--image-batch-size` | `1`, `1` | Caption generation requests per GPU batch |
-| `--auto-batch` | off | Adapt video/image batch sizes separately; retry CUDA OOM batches |
-| `--auto-batch-max` | `64` | Upper limit on adaptive batches |
-| `--auto-batch-reserve` | `0.10` | VRAM safety fraction, with at least 2 GiB reserved |
 | `--download-workers` | `1` | Hub download workers; higher values can hit rate limits |
 | `--decode-batch-size` | `64` | CPU video decode batch |
 | `--video-frames` | `32` | Uniform sparse frames per internal-node caption |
@@ -103,41 +100,10 @@ python -m robot101.data.annotate \
   --download-workers 4
 ```
 
-Benchmark before increasing these further. Fixed batching records failed caption
-batches; automatic batching retries CUDA OOM batches at a smaller size. Caption
-batch settings may change on resume without discarding compatible completed
-captions, including runs created before auto-batching was added. Model, token cap,
-frame sampling, and segmentation changes still require another output directory.
-`--video-frames 16` and smaller token caps are explicit
+Benchmark before increasing these further. An out-of-memory error is recorded;
+the script does not silently change batch size. Use another output directory
+when changing settings. `--video-frames 16` and smaller token caps are explicit
 efficiency deviations from the paper's captioning recipe.
-
-Automatic batching example:
-
-```bash
-python -m robot101.data.annotate --episodes 0-2 \
-  --output-dir outputs/annotations_auto512 --max-caption-tokens 512 \
-  --auto-batch --video-batch-size 4 --image-batch-size 4 \
-  --auto-batch-max 64 --push-to-hub \
-  --dst-repo-id kdaterao/so101_action_annotations
-```
-
-The fixed batch arguments become starting sizes. Successful batches estimate
-memory per request and grow by at most 2× toward the usable VRAM budget. CUDA
-OOM batches retry the same jobs at half size, retaining successful results. An
-OOM at size one is explicitly recorded as a failed caption. Other errors are
-not treated as memory problems. Model-loading OOM cannot be solved by batching.
-Tuning continues across episodes with separate video/image controllers; batch
-events, elapsed generation time, and peak allocations are saved in episode
-artifacts. This is a conservative adaptive estimate, not a guarantee of the
-largest possible batch or fastest throughput. Other GPU jobs can affect capacity.
-
-The terminal prints per-batch seconds and processing time before uploading, then
-segmentation/video-caption/image-caption/upload/total time at exit. `timings.json`
-and `summary.json` record current-invocation timings; caption phases include
-model loading, data loading, decoding and generation. Cached work is not counted
-as newly performed work. Local timings include upload time; the uploaded snapshot
-contains processing timings recorded before that upload. Interrupted and failed
-invocations retain their partial timings.
 
 Each annotation invocation samples hardware usage approximately once per second.
 At completion or interruption it prints peak process-tree CPU usage, host CPU

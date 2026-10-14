@@ -54,9 +54,6 @@ def build_parser():
     p.add_argument("--video-frames", type=int, default=32)
     p.add_argument("--video-batch-size", type=int, default=1)
     p.add_argument("--image-batch-size", type=int, default=1)
-    p.add_argument("--auto-batch", action="store_true", help="Adapt caption batches to CUDA VRAM; retry oversized batches")
-    p.add_argument("--auto-batch-max", type=int, default=64, help="Largest adaptive caption batch")
-    p.add_argument("--auto-batch-reserve", type=float, default=0.10, help="VRAM fraction reserved, with a 2 GiB minimum")
     p.add_argument("--max-caption-tokens", type=int, default=1024)
     add_hub_arguments(p)
     return p
@@ -75,20 +72,13 @@ def load_source_episode(dataset_class, repo_id, episode, root, revision, backend
 
 def resolve_run(args):
     """Freeze mutable source/model refs once; resume uses this same snapshot."""
-    execution_options = {"episodes", "stage", "resume", "output_dir", "download_workers",
-                         "push_to_hub", "dst_repo_id", "hub_private", "video_batch_size",
-                         "image_batch_size", "auto_batch", "auto_batch_max", "auto_batch_reserve"}
     requested = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
-                 if k not in execution_options}
+                 if k not in {"episodes", "stage", "resume", "output_dir", "download_workers",
+                              "push_to_hub", "dst_repo_id", "hub_private"}}
     path = args.output_dir / "run.json"
     key = fingerprint(requested)
-    if path.exists():
-        if not args.resume:
-            raise ValueError(f"{path} exists; use --resume")
-        existing = json.loads(path.read_text())
-        previous = {k: v for k, v in existing["requested"].items() if k not in execution_options}
-        if fingerprint(previous) != key:
-            raise ValueError(f"Incompatible configuration in {path}; choose a different output directory")
+    existing = cached_json(path, key, args.resume)
+    if existing:
         return existing
     from huggingface_hub import HfApi
     import requests
@@ -200,8 +190,6 @@ def caption_records(args, run, records, source, kind, worker_factory):
     from robot101.perception.annotation_models import release
     worker = None
     batch_size = args.video_batch_size if kind == "video" else args.image_batch_size
-    from robot101.data.utilities.auto_batch import AutoBatch, is_cuda_oom
-    adaptive = AutoBatch(batch_size, args.auto_batch_max, args.auto_batch_reserve) if args.auto_batch else None
     try:
         for record in records:
             jobs = []
@@ -239,11 +227,8 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     node["caption"] = result
                 continue
             record.setdefault("caption_timings", {})[f"{kind}_decode_seconds"] = perf_counter() - start
-            offset = 0
-            generation_seconds = 0.0
-            while offset < len(jobs):
-                size = adaptive.size if adaptive else batch_size
-                batch = jobs[offset:offset + size]
+            for offset in range(0, len(jobs), batch_size):
+                batch = jobs[offset:offset + batch_size]
                 requests, valid_jobs = [], []
                 for node, ids, path, key in batch:
                     if not all(data["masks"][args.camera][ids]) or any(data["frames"][args.camera][i] is None for i in ids):
@@ -255,9 +240,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     image_root = args.output_dir / "images" / f'ep{record["episode_index"]:06d}'
                     image_root.mkdir(parents=True, exist_ok=True)
                     for i, frame in zip(ids, frames, strict=True):
-                        image_path = image_root / f"f{i:06d}.jpg"
-                        if not image_path.exists():
-                            Image.fromarray(frame).save(image_path, quality=85)
+                        Image.fromarray(frame).save(image_root / f"f{i:06d}.jpg", quality=85)
                     if kind == "video":
                         frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
                     requests.append(dict(frames=np.stack(frames), fps=record["fps"],
@@ -265,50 +248,19 @@ def caption_records(args, run, records, source, kind, worker_factory):
                                          total_num_frames=node["end_frame"] - node["start_frame"]))
                     valid_jobs.append((node, ids, path, key))
                 if not valid_jobs:
-                    offset += len(batch)
                     continue
                 if worker is None:
                     # Fatal access/load errors stop this pass rather than
                     # marking every node as if its visual input were invalid.
                     worker = worker_factory(kind)
-                if adaptive:
-                    adaptive.begin(worker.torch, worker.device)
                 start = perf_counter()
-                retry_oom = False
-                saw_oom = False
                 try:
                     results = worker.caption(requests, args.max_caption_tokens)
                     if len(results) != len(valid_jobs):
                         raise ValueError("Wrong number of captions")
                 except Exception as exc:
-                    if adaptive and is_cuda_oom(exc, worker.torch):
-                        saw_oom = True
-                        adaptive.oom(len(valid_jobs), perf_counter() - start)
-                        retry_oom = len(valid_jobs) > 1
                     results = [dict(status="failed", error=str(exc)) for _ in valid_jobs]
                 seconds = perf_counter() - start
-                generation_seconds += seconds
-                if adaptive:
-                    record.setdefault("caption_batching", {}).setdefault(kind, []).extend(adaptive.events)
-                    adaptive.events.clear()
-                if saw_oom:
-                    import gc
-                    # Exception traceback is out of scope before clearing CUDA
-                    # allocations from the failed generation call.
-                    del requests
-                    gc.collect()
-                    worker.torch.cuda.empty_cache()
-                if retry_oom:
-                    del results
-                    print(f'{kind} ep{record["episode_index"]}: CUDA OOM at batch {len(valid_jobs)}; '
-                          f'retrying at {adaptive.size}', flush=True)
-                    continue
-                if adaptive and all(r.get("status", "ok") == "ok" for r in results):
-                    event = adaptive.complete(worker.torch, worker.device, len(valid_jobs), seconds)
-                    record["caption_batching"][kind].append(event)
-                    adaptive.events.clear()
-                    print(f'  auto-batch: {len(valid_jobs)} nodes, peak allocation '
-                          f'{event["peak_allocated_mib"] / 1024:.2f} GiB, next {adaptive.size}', flush=True)
                 for (node, ids, path, key), result in zip(valid_jobs, results, strict=True):
                     result.update(fingerprint=key, kind=kind, sample_frames=ids,
                                   sample_timestamps=[data["timestamps"][i] for i in ids],
@@ -316,68 +268,29 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     result.setdefault("status", "ok")
                     atomic_json(path, result)
                     node["caption"] = result
-                offset += len(batch)
-                print(f'{kind} ep{record["episode_index"]}: nodes {offset}/{len(jobs)} '
-                      f'(batch {len(valid_jobs)}, {seconds:.1f}s)', flush=True)
-            record["caption_timings"][f"{kind}_generation_seconds"] = generation_seconds
+                print(f'{kind} ep{record["episode_index"]}: nodes {offset + len(batch)}/{len(jobs)}', flush=True)
     finally:
-        if adaptive and worker is not None:
-            # Peak resets used for adaptive estimates must not erase the
-            # run-wide allocation peak reported by the caller.
-            peak = max(adaptive.peak_allocated, worker.torch.cuda.max_memory_allocated(worker.device))
-            for record in records:
-                record.setdefault("caption_timings", {})[f"{kind}_peak_allocated_mib"] = peak / 2**20
         release(worker)
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     from robot101.data.utilities.hardware_usage import HardwareUsage
-    started = perf_counter()
-    timings = dict(status="running", segmentation_seconds=0.0, video_captioning_seconds=0.0,
-                   image_captioning_seconds=0.0, upload_seconds=0.0,
-                   execution_options={k: getattr(args, k) for k in (
-                       "auto_batch", "auto_batch_max", "auto_batch_reserve", "video_batch_size", "image_batch_size")})
     usage = HardwareUsage()
     try:
-        _run(args, usage, timings, started)
-        timings["status"] = "complete"
-    except BaseException as exc:
-        timings["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
-        raise
+        _run(args, usage)
     finally:
         usage.finish(args.output_dir)
-        timings["total_wall_seconds"] = perf_counter() - started
-        timings.setdefault("processing_seconds", timings["total_wall_seconds"] - timings["upload_seconds"])
-        save_timings(args.output_dir, timings)
-        print(f'Time spent: processing {timings["processing_seconds"]:.1f}s '
-              f'(segmentation {timings["segmentation_seconds"]:.1f}s, '
-              f'video captions {timings["video_captioning_seconds"]:.1f}s, '
-              f'image captions {timings["image_captioning_seconds"]:.1f}s); '
-              f'upload {timings["upload_seconds"]:.1f}s; total {timings["total_wall_seconds"]:.1f}s', flush=True)
 
 
-def save_timings(output_dir, timings):
-    atomic_json(output_dir / "timings.json", timings)
-    summary_path = output_dir / "summary.json"
-    if summary_path.exists():
-        summary = json.loads(summary_path.read_text())
-        summary["processing_timings"] = timings
-        atomic_json(summary_path, summary)
-
-
-def _run(args, usage, timings, started):
+def _run(args, usage):
     validate_hub_arguments(args)
     for name in ("download_workers", "decode_batch_size", "sample_step", "jepa_batch_size", "max_segments",
-                 "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens", "auto_batch_max"):
+                 "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens"):
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
     if args.min_duration < 0 or not np.isfinite(args.min_duration) or not -1 <= args.silhouette_threshold <= 1:
         raise SystemExit("Invalid duration or silhouette threshold")
-    if not np.isfinite(args.auto_batch_reserve) or not 0 < args.auto_batch_reserve < 1:
-        raise SystemExit("--auto-batch-reserve must be between 0 and 1")
-    if args.auto_batch and not args.device.startswith("cuda"):
-        raise SystemExit("--auto-batch requires a CUDA device")
     windows(1, args.window_frames, args.window_stride)
     os.environ["SO101_HF_DOWNLOAD_WORKERS"] = str(args.download_workers)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -405,7 +318,6 @@ def _run(args, usage, timings, started):
         return worker
     records, failures = [], []
     start = perf_counter()
-    timings["setup_seconds"] = start - started
     try:
         for episode in episodes:
             print(f"[segment] episode {episode}", flush=True)
@@ -437,19 +349,13 @@ def _run(args, usage, timings, started):
             atomic_json(args.output_dir / "failures.json", failures)
     finally:
         release(worker)
-        timings["segmentation_seconds"] = perf_counter() - start
-    prior_peak_mib = torch.cuda.max_memory_allocated(args.device) / 2**20 if args.device.startswith("cuda") else 0
     def captioner(kind):
         return Captioner(args.video_model if kind == "video" else args.image_model,
                          run["resolved"][kind], kind, args.device, args.dtype)
     try:
         if args.stage != "segment":
             for kind in ("video", "image"):
-                phase_start = perf_counter()
-                try:
-                    caption_records(args, run, records, source, kind, captioner)
-                finally:
-                    timings[f"{kind}_captioning_seconds"] = perf_counter() - phase_start
+                caption_records(args, run, records, source, kind, captioner)
     finally:
         for record in records:
             record["review_required"] |= any(n.get("caption", {}).get("status") != "ok" or
@@ -465,23 +371,11 @@ def _run(args, usage, timings, started):
         atomic_json(args.output_dir / "summary.json", dict(episodes=len(records), skipped=failures,
                     retained_nodes=sum(len(r["nodes"]) for r in records), wall_seconds=perf_counter() - start,
                     peak_cpu_ram_mib=peak_ram_mib,
-                    peak_vram_mib=max([prior_peak_mib,
-                        torch.cuda.max_memory_allocated(args.device) / 2**20,
-                        *[r.get("caption_timings", {}).get(f"{kind}_peak_allocated_mib", 0)
-                          for r in records for kind in ("video", "image")]]) if args.device.startswith("cuda") else None))
+                    peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else None))
     usage.finish(args.output_dir)
-    timings["processing_seconds"] = perf_counter() - started
-    timings["status"] = "processing_complete"
-    save_timings(args.output_dir, timings)
-    print(f'Processing finished in {timings["processing_seconds"]:.1f}s '
-          f'({timings["processing_seconds"] / 60:.1f} minutes), excluding upload.', flush=True)
     print(f"Saved caption trees and reports to {args.output_dir}")
     if args.push_to_hub:
-        upload_start = perf_counter()
-        try:
-            publish_annotations(args.output_dir, args.dst_repo_id, "captioning", private=args.hub_private)
-        finally:
-            timings["upload_seconds"] = perf_counter() - upload_start
+        publish_annotations(args.output_dir, args.dst_repo_id, "captioning", private=args.hub_private)
 
 
 if __name__ == "__main__":
