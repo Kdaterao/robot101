@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -185,6 +186,15 @@ def segment_episode(args, run, episode, source, worker):
     return record
 
 
+@contextmanager
+def episode_timer(record, phase):
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        record.setdefault("processing_timings", {})[f"{phase}_seconds"] = perf_counter() - started
+
+
 def caption_records(args, run, records, source, kind, worker_factory):
     from PIL import Image
     from robot101.perception.annotation_models import release
@@ -192,83 +202,84 @@ def caption_records(args, run, records, source, kind, worker_factory):
     batch_size = args.video_batch_size if kind == "video" else args.image_batch_size
     try:
         for record in records:
-            jobs = []
-            for node in record["nodes"]:
-                if node["caption_kind"] != kind:
-                    continue
-                indices = uniform_frames(node, args.video_frames) if kind == "video" else [midpoint(node)]
-                key = fingerprint(dict(segment=record["fingerprint"], node=node, model=run["resolved"][kind],
-                                       model_id=args.video_model if kind == "video" else args.image_model,
-                                       sample_frames=indices, tokens=args.max_caption_tokens, prompt="neutral-detailed-v1",
-                                       dtype=args.dtype, adapter="direct-frames-metadata-v2"))
-                path = args.output_dir / "node_captions" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
-                cached = cached_json(path, key, args.resume)
-                if cached and cached.get("status") == "ok":
-                    node["caption"] = cached
-                else:
-                    jobs.append((node, indices, path, key))
-            if not jobs:
-                continue
-            start = perf_counter()
-            try:
-                ds = source(record["episode_index"])
-                record.setdefault("caption_timings", {})[f"{kind}_source_load_seconds"] = perf_counter() - start
-                start = perf_counter()
-                data = load_episode_metadata(ds, [args.camera], preserve_auxiliary=False)
-                record["caption_timings"][f"{kind}_metadata_seconds"] = perf_counter() - start
-                start = perf_counter()
-                indices = sorted({i for _, ids, _, _ in jobs for i in ids})
-                decode_episode_cameras(ds, data, [args.camera], indices=indices,
-                                       batch_size=args.decode_batch_size, backend=args.video_backend)
-            except Exception as exc:
-                for node, indices, path, key in jobs:
-                    result = dict(fingerprint=key, status="failed", error=str(exc), sample_frames=indices, kind=kind)
-                    atomic_json(path, result)
-                    node["caption"] = result
-                continue
-            record.setdefault("caption_timings", {})[f"{kind}_decode_seconds"] = perf_counter() - start
-            for offset in range(0, len(jobs), batch_size):
-                batch = jobs[offset:offset + batch_size]
-                requests, valid_jobs = [], []
-                for node, ids, path, key in batch:
-                    if not all(data["masks"][args.camera][ids]) or any(data["frames"][args.camera][i] is None for i in ids):
-                        result = dict(fingerprint=key, status="failed", error="missing_caption_frame", sample_frames=ids, kind=kind)
-                        atomic_json(path, result)
-                        node["caption"] = result
+            with episode_timer(record, kind):
+                jobs = []
+                for node in record["nodes"]:
+                    if node["caption_kind"] != kind:
                         continue
-                    frames = [data["frames"][args.camera][i] for i in ids]
-                    image_root = args.output_dir / "images" / f'ep{record["episode_index"]:06d}'
-                    image_root.mkdir(parents=True, exist_ok=True)
-                    for i, frame in zip(ids, frames, strict=True):
-                        Image.fromarray(frame).save(image_root / f"f{i:06d}.jpg", quality=85)
-                    if kind == "video":
-                        frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
-                    requests.append(dict(frames=np.stack(frames), fps=record["fps"],
-                                         frame_indices=[i - node["start_frame"] for i in ids],
-                                         total_num_frames=node["end_frame"] - node["start_frame"]))
-                    valid_jobs.append((node, ids, path, key))
-                if not valid_jobs:
+                    indices = uniform_frames(node, args.video_frames) if kind == "video" else [midpoint(node)]
+                    key = fingerprint(dict(segment=record["fingerprint"], node=node, model=run["resolved"][kind],
+                                           model_id=args.video_model if kind == "video" else args.image_model,
+                                           sample_frames=indices, tokens=args.max_caption_tokens, prompt="neutral-detailed-v1",
+                                           dtype=args.dtype, adapter="direct-frames-metadata-v2"))
+                    path = args.output_dir / "node_captions" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
+                    cached = cached_json(path, key, args.resume)
+                    if cached and cached.get("status") == "ok":
+                        node["caption"] = cached
+                    else:
+                        jobs.append((node, indices, path, key))
+                if not jobs:
                     continue
-                if worker is None:
-                    # Fatal access/load errors stop this pass rather than
-                    # marking every node as if its visual input were invalid.
-                    worker = worker_factory(kind)
                 start = perf_counter()
                 try:
-                    results = worker.caption(requests, args.max_caption_tokens)
-                    if len(results) != len(valid_jobs):
-                        raise ValueError("Wrong number of captions")
+                    ds = source(record["episode_index"])
+                    record.setdefault("caption_timings", {})[f"{kind}_source_load_seconds"] = perf_counter() - start
+                    start = perf_counter()
+                    data = load_episode_metadata(ds, [args.camera], preserve_auxiliary=False)
+                    record["caption_timings"][f"{kind}_metadata_seconds"] = perf_counter() - start
+                    start = perf_counter()
+                    indices = sorted({i for _, ids, _, _ in jobs for i in ids})
+                    decode_episode_cameras(ds, data, [args.camera], indices=indices,
+                                           batch_size=args.decode_batch_size, backend=args.video_backend)
                 except Exception as exc:
-                    results = [dict(status="failed", error=str(exc)) for _ in valid_jobs]
-                seconds = perf_counter() - start
-                for (node, ids, path, key), result in zip(valid_jobs, results, strict=True):
-                    result.update(fingerprint=key, kind=kind, sample_frames=ids,
-                                  sample_timestamps=[data["timestamps"][i] for i in ids],
-                                  model_revision=run["resolved"][kind], seconds=seconds / len(valid_jobs))
-                    result.setdefault("status", "ok")
-                    atomic_json(path, result)
-                    node["caption"] = result
-                print(f'{kind} ep{record["episode_index"]}: nodes {offset + len(batch)}/{len(jobs)}', flush=True)
+                    for node, indices, path, key in jobs:
+                        result = dict(fingerprint=key, status="failed", error=str(exc), sample_frames=indices, kind=kind)
+                        atomic_json(path, result)
+                        node["caption"] = result
+                    continue
+                record.setdefault("caption_timings", {})[f"{kind}_decode_seconds"] = perf_counter() - start
+                for offset in range(0, len(jobs), batch_size):
+                    batch = jobs[offset:offset + batch_size]
+                    requests, valid_jobs = [], []
+                    for node, ids, path, key in batch:
+                        if not all(data["masks"][args.camera][ids]) or any(data["frames"][args.camera][i] is None for i in ids):
+                            result = dict(fingerprint=key, status="failed", error="missing_caption_frame", sample_frames=ids, kind=kind)
+                            atomic_json(path, result)
+                            node["caption"] = result
+                            continue
+                        frames = [data["frames"][args.camera][i] for i in ids]
+                        image_root = args.output_dir / "images" / f'ep{record["episode_index"]:06d}'
+                        image_root.mkdir(parents=True, exist_ok=True)
+                        for i, frame in zip(ids, frames, strict=True):
+                            Image.fromarray(frame).save(image_root / f"f{i:06d}.jpg", quality=85)
+                        if kind == "video":
+                            frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
+                        requests.append(dict(frames=np.stack(frames), fps=record["fps"],
+                                             frame_indices=[i - node["start_frame"] for i in ids],
+                                             total_num_frames=node["end_frame"] - node["start_frame"]))
+                        valid_jobs.append((node, ids, path, key))
+                    if not valid_jobs:
+                        continue
+                    if worker is None:
+                        # Fatal access/load errors stop this pass rather than
+                        # marking every node as if its visual input were invalid.
+                        worker = worker_factory(kind)
+                    start = perf_counter()
+                    try:
+                        results = worker.caption(requests, args.max_caption_tokens)
+                        if len(results) != len(valid_jobs):
+                            raise ValueError("Wrong number of captions")
+                    except Exception as exc:
+                        results = [dict(status="failed", error=str(exc)) for _ in valid_jobs]
+                    seconds = perf_counter() - start
+                    for (node, ids, path, key), result in zip(valid_jobs, results, strict=True):
+                        result.update(fingerprint=key, kind=kind, sample_frames=ids,
+                                      sample_timestamps=[data["timestamps"][i] for i in ids],
+                                      model_revision=run["resolved"][kind], seconds=seconds / len(valid_jobs))
+                        result.setdefault("status", "ok")
+                        atomic_json(path, result)
+                        node["caption"] = result
+                    print(f'{kind} ep{record["episode_index"]}: nodes {offset + len(batch)}/{len(jobs)}', flush=True)
     finally:
         release(worker)
 
@@ -330,7 +341,10 @@ def _run(args, usage):
                 if not args.resume:
                     raise SystemExit("Caption-only requires --resume")
             try:
-                records.append(segment_episode(args, run, episode, source, encoder))
+                episode_start = perf_counter()
+                record = segment_episode(args, run, episode, source, encoder)
+                record["processing_timings"] = dict(segmentation_seconds=perf_counter() - episode_start)
+                records.append(record)
             except ValueError as exc:
                 if "exist" in str(exc).lower() or "incompatible" in str(exc).lower():
                     raise
@@ -360,6 +374,15 @@ def _run(args, usage):
         for record in records:
             record["review_required"] |= any(n.get("caption", {}).get("status") != "ok" or
                                              n.get("caption", {}).get("truncated", False) for n in record["nodes"])
+            elapsed = record["processing_timings"]
+            elapsed["processing_seconds"] = sum(elapsed.get(f"{phase}_seconds", 0)
+                                                for phase in ("segmentation", "video", "image"))
+            print(f'Episode {record["episode_index"]} processing time: '
+                  f'{elapsed["processing_seconds"]:.1f}s ({elapsed["processing_seconds"] / 60:.1f} min) '
+                  f'— segmentation {elapsed.get("segmentation_seconds", 0):.1f}s, '
+                  f'video captions {elapsed.get("video_seconds", 0):.1f}s, '
+                  f'image captions {elapsed.get("image_seconds", 0):.1f}s '
+                  f'(this invocation; upload excluded)', flush=True)
             atomic_json(args.output_dir / "episodes" / f'ep{record["episode_index"]:06d}.json', record)
             write_report(args.output_dir, record)
         exported = [json.loads(path.read_text()) for path in sorted((args.output_dir / "episodes").glob("ep*.json"))]
@@ -370,9 +393,12 @@ def _run(args, usage):
         peak_ram_mib = peak_rss / (2**20 if sys.platform == "darwin" else 1024)
         atomic_json(args.output_dir / "summary.json", dict(episodes=len(records), skipped=failures,
                     retained_nodes=sum(len(r["nodes"]) for r in records), wall_seconds=perf_counter() - start,
+                    episode_processing_times={str(r["episode_index"]): r["processing_timings"] for r in records},
                     peak_cpu_ram_mib=peak_ram_mib,
                     peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else None))
     usage.finish(args.output_dir)
+    print(f'Total processing time: {perf_counter() - start:.1f}s '
+          f'({(perf_counter() - start) / 60:.1f} min), excluding upload.', flush=True)
     print(f"Saved caption trees and reports to {args.output_dir}")
     if args.push_to_hub:
         publish_annotations(args.output_dir, args.dst_repo_id, "captioning", private=args.hub_private)

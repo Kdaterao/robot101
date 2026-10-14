@@ -118,6 +118,17 @@ Reports describe the current invocation, including cache reuse, and are replaced
 on resume. The existing PyTorch peak-allocation metric remains separate from
 device-wide VRAM.
 
+At the end of processing, the script prints each episode's elapsed time with
+segmentation, video-caption and image-caption breakdowns, plus total processing
+wall time before upload. Episode time is the sum of its processing passes, not
+the wait between passes. It includes data/model loading and inspection-image
+writing; shared caption model loading is charged to the first episode using it.
+Timings describe the current invocation, so resumed cached work takes only its
+cache-read time. Partial caption passes retain elapsed timing on interruption.
+Per-episode timings are saved in episode sidecars and `summary.json` under
+`episode_processing_times`. Hardware/report cleanup is included in total wall
+time; Hub upload is excluded from all processing times.
+
 Ward clustering links only neighboring spans. Spatial pooling and overlap
 averaging do not add feature normalization. Tubelet features are assigned to
 their real sampled frames, ignoring padded positions; padding still provides
