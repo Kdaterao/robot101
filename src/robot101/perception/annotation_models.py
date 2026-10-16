@@ -102,9 +102,20 @@ class Captioner:
     def caption(self, requests, max_tokens=1024):
         conversations = []
         for request in requests:
+            prompt = "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."
+            if request.get("gripper_hints") is not None:
+                import json
+                prompt += (
+                    "\nRecorded gripper sensor context follows. Positions are normalized within this episode, "
+                    "not calibrated physical jaw widths. Use these as likely open/closed/transition hints, "
+                    "and describe what the imagery actually supports. Closing alone does not prove grasp "
+                    "or object contact; opening alone does not prove object release or task success. "
+                    "Hints refer to the stated source frames; changing states at different times can be a normal action sequence. "
+                    "If the signal is unavailable or ambiguous, say so rather than asserting a jaw state. "
+                    "For an image, describe only the visible instant, not motion across the whole interval.\n" +
+                    json.dumps(request["gripper_hints"], separators=(",", ":")))
             conversations.append([{"role": "user", "content": [
-                {"type": self.kind}, {"type": "text", "text":
-                  "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."}]}])
+                {"type": self.kind}, {"type": "text", "text": prompt}]}])
         text = self.processor.apply_chat_template(conversations, tokenize=False, add_generation_prompt=True)
         if self.kind == "video":
             # Supply decoded sparse frames directly. Do not let the processor

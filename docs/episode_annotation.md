@@ -83,6 +83,8 @@ captions are retried. Incompatible settings require another output directory.
 | `--decode-batch-size` | `64` | CPU video decode batch |
 | `--video-frames` | `32` | Uniform sparse frames per internal-node caption |
 | `--max-caption-tokens` | `1024` | Generation cap per caption |
+| `--gripper-hints` / `--no-gripper-hints` | enabled | Supply recorded gripper position/transition hints to captioners |
+| `--gripper-open-direction` | `increasing` | Use `decreasing` if lower sensor values indicate opening |
 | `--min-duration` | `0.5` | Keep hierarchy nodes strictly longer than this many seconds |
 | `--max-segments` | `8` | Largest candidate count for the exported subtask cut |
 | `--silhouette-threshold` | `0.15` | Minimum score for a multi-subtask cut |
@@ -143,8 +145,39 @@ patch/merge grid, an explicit spatial deviation from the paper. Source FPS,
 node duration and sampled indices determine the effective sparse-video FPS;
 Qwen2.5 represents timing using uniform spacing rather than per-frame timestamps.
 Very short clips may repeat frame indices to satisfy the
-requested count; the actual indices and timestamps are saved. Prompts describe
-images/videos neutrally; intended tasks and gripper values remain separate context.
+requested count; the actual indices and timestamps are saved. Episode task text
+is not used to imply observed actions or success. Measured gripper context is
+now supplied to captioners by default, an explicit robotics adaptation.
+
+### Gripper sensor hints before captioning
+
+The script reads the recorded observation-state gripper signal, smooths it with
+a five-frame moving average, and normalizes it against the episode's observed
+range. The lower 15% is `likely_closed` and the upper 15% is `likely_open` when
+opening increases the signal; other positions are `intermediate`. Constant,
+missing or invalid signals remain unavailable/unknown, rather than inventing a
+jaw state. The thresholds are episode-relative, not calibrated physical limits;
+an episode containing only partial motion may not establish fully open/closed jaws.
+
+Qwen receives compact sampled-state spans and in-interval opening/closing events
+as text with source-frame timing. Image captions receive only the sampled
+instant's position hints. State changes at different times are normal transitions,
+not automatic contradictions. Sensor closing does not prove contact or grasp;
+opening does not prove release of an object or task completion. No sensor text
+is burned into the clean images or videos. Hint provenance is saved with each
+caption and passed to Haiku as evidence; JEPA boundaries stay unchanged.
+
+```bash
+python -m robot101.data.annotate --episodes 0 \
+  --output-dir outputs/annotations_gripper_hints \
+  --max-caption-tokens 512 --video-batch-size 4 --image-batch-size 4 \
+  --push-to-hub --dst-repo-id kdaterao/so101_action_annotations_gripper_hints
+```
+
+Use `--gripper-open-direction decreasing` for a dataset with reversed gripper
+conventions, or `--no-gripper-hints` for a vision-only comparison. Use a new
+output directory for the new caption prompts; compatible JEPA feature/segment
+caches can still be reused using the cache-copy procedure below.
 
 ### Reusing JEPA results after changing video models
 
@@ -184,6 +217,30 @@ The viewer loads no models and does not play videos.
 For local results instead, pass `--root outputs/annotations_batched`; local mode
 uses only Python's standard library and refreshes partial captions every ten seconds.
 
+To inspect local Haiku outputs, including rewritten action labels/captions:
+
+```bash
+python scripts/view_episode_annotations.py --root outputs/haiku_test --open-browser
+```
+
+The Text selector defaults to the rewritten annotation when present; switch to
+the original caption to compare. Review diagnostics and critique are collapsed
+separately. Original sampled frames remain associated with the node. For Hub-fed
+aggregation runs, `caption_source.json` supplies the pinned source repository for
+inspection images, downloaded only when displayed. Captions remain viewable if
+source images are unavailable. Context-only nodes show original captions.
+
+After uploading aggregation results, view them directly from the Hub with:
+
+```bash
+python scripts/view_episode_annotations.py \
+  --repo-id kdaterao/so101_action_annotations11 --stage aggregation --open-browser
+```
+
+This reads `aggregation/episodes/` rather than `captioning/episodes/`. It uses
+inspection images from the same repository's `captioning/` folder or the original
+source specified in the uploaded `caption_source.json`.
+
 On a VM, omit `--open-browser` and forward its viewer port from your laptop:
 
 ```bash
@@ -195,40 +252,208 @@ default. Keep the annotation process and viewer running in separate terminals.
 
 ### Run aggregation
 
-First inspect requests without credentials, GPU inference, or API spending:
+Run commands from the repository root. This is a **text-only API step**: it does
+not load local vision models or require a GPU. By default it standardizes only
+the selected controller subtasks, preserves IDs/boundaries, and flags uncertain evidence for review.
+Descendant and root captions remain input evidence, without separate API calls
+for those context nodes. The root is processed only if it is itself selected.
+This selected-only aggregation is an efficiency adaptation of the full-tree method.
+It does **not** merge subtasks, verify video pixels, or run grounding.
+
+#### 1. Activate the environment and authenticate
+
+If you already installed the annotation environment:
+
+```bash
+source .venv-annotation/bin/activate
+```
+
+For first-time Linux environment setup, use the annotation installer in the setup
+section above. Two separate credentials are used:
+
+- `HF_TOKEN` or `hf auth login`: download private source artifacts and upload results.
+- `ANTHROPIC_API_KEY`: call Claude. A Hugging Face token cannot replace this key.
+
+For an actual API run, set the key in the current terminal:
+
+```bash
+export ANTHROPIC_API_KEY="YOUR_ANTHROPIC_API_KEY"
+```
+
+Replace the placeholder with your API key; do not put it in a tracked file. A dry
+run does not need this key. It still needs network access for Hub input and Hub
+credentials when that dataset is private.
+
+If the API key is not scoped to a single workspace, also set:
+
+```bash
+export ANTHROPIC_WORKSPACE_ID="YOUR_WORKSPACE_ID"
+```
+
+Find the ID in the Claude Console under **Settings → Workspaces**, in the ID
+column. The script sends it as the `anthropic-workspace-id` header on every
+request. It is optional for workspace-scoped keys. See
+[Anthropic authentication](https://platform.claude.com/docs/en/manage-claude/authentication#select-a-workspace).
+The script reads these environment variables; it does not automatically load a
+`.env` file. After correcting credentials/workspace settings, use `--resume` to
+retry failed nodes without changing model/round/token settings.
+
+#### 2. Validate one episode without calling Claude
 
 ```bash
 python -m robot101.data.aggregate_annotations \
-  --input-dir outputs/annotations_test \
-  --output-dir outputs/standardized_test --dry-run
+  --src-repo-id kdaterao/so101_action_annotations11 \
+  --episodes 0 \
+  --output-dir outputs/haiku_test \
+  --dry-run
 ```
 
-Set `ANTHROPIC_API_KEY` in your environment, then run:
+This automatically fetches only the selected `captioning/episodes/ep*.json`
+files, validates the trees, and writes text prompts under
+`outputs/haiku_test/request_previews/`. It does not download images, videos or
+feature caches, call Claude, or upload results. Inspect the previews to confirm
+that captions, source bounds, descendant evidence and root context are present.
+
+#### 3. Run the real three-round aggregation
+
+With the API key set, remove `--dry-run`:
 
 ```bash
 python -m robot101.data.aggregate_annotations \
-  --input-dir outputs/annotations_test \
-  --output-dir outputs/standardized_test
+  --src-repo-id kdaterao/so101_action_annotations11 \
+  --episodes 0 \
+  --output-dir outputs/haiku_test \
+  --model claude-haiku-5-5 \
+  --rounds 3 --concurrency 2 --max-tokens 2048
 ```
 
-Add `--resume` to continue. Defaults: `--model claude-haiku-5-5`, `--rounds 3`,
-`--concurrency 2`, `--max-tokens 2048`. Each retained node receives an initial
-annotation followed by two critique/revision rounds. Fewer rounds are an explicit
-adaptation. Every successful API response is checkpointed before validation;
-resume can reuse it after an interruption before round completion.
+This makes paid API requests and saves results locally. The same output directory
+can be used immediately after its dry run. Each selected subtask receives an initial
+annotation and two critique/revision rounds. For 3–4 selected subtasks this is
+9–12 requests, plus any repairs/retries, rather than 207 requests for 69 nodes.
+The script prints the requested, cached and pending node counts before API work.
+Missing or truncated captions remain review items;
+task text is intended context, not proof of success. Desired completion conditions
+are not observed success labels.
 
-The API receives captions, source bounds, descendants in depth-first order, root
-context, and task metadata. No images are sent. It cannot verify pixel grounding
-or certify success. Desired completion conditions are not success labels.
-Missing/truncated captions and suggested changes require review. Unlike the
-paper's final four-second cutoff, short robot subtasks remain eligible.
+To skip the two critique/revision passes, add `--no-review`:
 
-The core fields are `brief_action`, `detailed_action`, `actor`, `brief_caption`,
-and `detailed_caption`. A `robotics` object adds manipulated object, destination,
-completion condition, evidence, conflicts, review status, and suggested changes.
-IDs and bounds are immutable; suggestions never rewrite them. Optional
+```bash
+python -m robot101.data.aggregate_annotations \
+  --src-repo-id kdaterao/so101_action_annotations11 --episodes 0 \
+  --output-dir outputs/haiku_single_pass --no-review
+```
+
+`--no-review` overrides `--rounds` and makes the effective round count one. Five
+selected subtasks therefore need five initial requests, before any repairs or
+transient retries. JSON validation, immutable-bound checks, the one malformed
+output repair attempt, uncertainty flags and `review.json` remain active. The
+flag skips model critique passes; it does not declare annotations human-verified.
+Use a new output directory when changing effective rounds. The updated
+gripper-aware/temporal evidence prompt also requires a new aggregation output
+directory when upgrading older runs.
+
+#### 4. Inspect results, resume, and optionally upload
+
+```bash
+cat outputs/haiku_test/summary.json
+cat outputs/haiku_test/failures.json
+```
+
+Inspect `annotations_subtasks.jsonl` for selected-subtask annotations and
+`review.json` for uncertainty/conflicts. `annotations.jsonl` contains the full
+hierarchy, with unrequested context nodes marked `aggregation.status=not_requested`;
+`nodes/ep000000/` contains requested nodes' requests, refinement rounds,
+final annotation and token usage. Check labels against the original footage;
+zero schema failures does not establish annotation accuracy.
+
+To continue an interrupted run or upload completed results:
+
+```bash
+python -m robot101.data.aggregate_annotations \
+  --src-repo-id kdaterao/so101_action_annotations11 \
+  --episodes 0 \
+  --output-dir outputs/haiku_test \
+  --resume --push-to-hub \
+  --dst-repo-id kdaterao/so101_action_annotations11
+```
+
+The model/round/token defaults match the explicit command above. Keep these
+settings unchanged on resume; completed nodes and checkpointed successful
+responses are reused. Failed nodes retry. Upload writes under `aggregation/`,
+allowing the same repository to retain `captioning/`. `--push-to-hub` requires a
+`--dst-repo-id` and cannot be combined with `--dry-run`.
+
+You can resume an earlier full-tree run in the same directory using the new
+selected-only default: compatible selected-node results are reused, unselected
+nodes receive no new requests, and they are excluded from failure/review counts
+and flat aggregation rows. Old per-node cache files are retained. The complete
+hierarchy and original captions remain in episode JSON sidecars.
+
+API requests use [schema-constrained JSON output](https://platform.claude.com/docs/en/build-with-claude/structured-outputs),
+followed by local field and immutable-boundary validation. New suggested changes
+use `null` or an object containing a `note`; existing cached suggestion objects
+remain compatible. Complete Markdown JSON fences from older responses are
+accepted, but malformed JSON is not silently repaired into invented annotations.
+One model repair request is still allowed after validation failure. Refusals,
+empty responses, unexpected stop reasons and token-limit truncation remain
+explicit failures. A valid JSON response does not establish visual accuracy.
+After updating this script, rerun the same command with `--resume` to retry
+previous parse failures while retaining completed nodes and valid rounds. If the
+SDK rejects `output_config`, update it in the active environment:
+
+```bash
+python -m pip install --upgrade "anthropic>=0.125,<1"
+```
+
+#### Useful arguments and source behavior
+
+| Argument | Default | Purpose |
+| --- | --- | --- |
+| `--src-repo-id` | unset | Read caption-tree artifacts from a Hub dataset |
+| `--input-dir` | `outputs/annotations` when no Hub source is given | Read local `episodes/ep*.json`; mutually exclusive with Hub input |
+| `--src-revision` | `main` | Source dataset revision, resolved to a pinned commit |
+| `--episodes` | all available | Select episodes, e.g. `0`, `0-2`, or `0-25:5` |
+| `--model` | `claude-haiku-5-5` | Claude API model ID |
+| `--rounds` | `3` | Initial annotation plus critique/revision rounds |
+| `--no-review` | off | Override rounds to one; skip critique/revision passes |
+| `--node-scope` | `selected` | Only selected subtasks; `all` restores aggregation of every retained node |
+| `--concurrency` | `2` | Concurrent node jobs; rounds within each node stay sequential |
+| `--max-tokens` | `2048` | API output cap per request; independent of GPU caption token limits |
+| `--resume` | off | Reuse compatible local checkpoints |
+
+Use an explicit episode selection for initial tests. `--episodes 0-25:5` selects
+0, 5, 10, 15, 20, 25; all must exist in the annotation repository. Concurrency
+and node scope can change on resume; changing model, rounds or token cap requires a new output
+directory. Fewer rounds are a departure from the three-round recipe.
+
+Hub input uses the saved Hugging Face login or `HF_TOKEN`. The source commit is
+recorded in `caption_source.json` and stays pinned for that output directory,
+including after a dry run. Choose a new output directory to read a newer source
+snapshot or different repository. Local input instead uses:
+
+```bash
+python -m robot101.data.aggregate_annotations \
+  --input-dir outputs/annotations_qwen25 \
+  --episodes 0 --output-dir outputs/haiku_local --dry-run
+```
+
+The core annotation fields are `brief_action`, `detailed_action`, `actor`,
+`brief_caption`, and `detailed_caption`. The `robotics` object adds manipulated
+object, destination, completion condition, evidence, conflicts, review status
+and suggested changes. Suggestions do not rewrite IDs or bounds. Optional
 `--grounding-diagnostics diagnostics.jsonl` adds text diagnostics keyed by source
-`episode_index` for later integration. It does not invoke grounding.
+`episode_index`; it does not invoke grounding.
+
+| Problem | Action |
+| --- | --- |
+| Missing caption artifacts | Use an annotation repo containing `captioning/episodes/ep*.json` and episode IDs it actually contains. A raw LeRobot video dataset is not this input format. |
+| Hub 401/403 | Run `hf auth login` with an account/token that can read the source and write the destination. |
+| API authentication error | Set a valid `ANTHROPIC_API_KEY` in the same terminal. |
+| API 400 asking for `anthropic-workspace-id` | Set `ANTHROPIC_WORKSPACE_ID` to the ID from Claude Console Settings → Workspaces, or use a workspace-scoped key; rerun with `--resume`. |
+| Rate limiting | Lower `--concurrency`; transient errors are retried with backoff. |
+| Response reached `max_tokens` | Raise `--max-tokens` in a new output directory; truncated responses are not accepted. |
+| Incompatible cache | Keep processing arguments/source snapshot unchanged or choose another output directory. |
 
 ## Artifacts and validation
 

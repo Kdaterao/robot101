@@ -24,6 +24,8 @@ def dataset_rows(records, stage):
     """One row per retained node; keep arbitrary diagnostics in the sidecars."""
     for record in records:
         for node in record["nodes"]:
+            if stage == "aggregation" and node.get("aggregation", {}).get("status") == "not_requested":
+                continue
             caption = node.get("caption", {})
             row = dict(source_repo_id=record["source_repo_id"], source_revision=record["source_revision"],
                        episode_index=record["episode_index"], node_id=node["id"], parent_id=node["parent"],
@@ -89,7 +91,8 @@ Action100M-inspired annotation artifacts using V-JEPA 2.1, configurable captione
 (default Qwen2.5-VL video and Qwen3-VL image), and optional Claude aggregation.
 This is an adaptation, not a reproduction. Exact models are recorded in run.json.
 
-Each `train` row represents one retained hierarchy node. `selected_subtask` marks
+Each `train` row represents one captioned or requested aggregation node. Context-only
+nodes remain in the episode sidecars and are omitted from aggregation rows. `selected_subtask` marks
 the controller cut; source frame intervals are half-open `[start_frame, end_frame)`.
 The split name does not imply a held-out evaluation split or verified labels.
 Source dataset IDs/revisions and episode IDs identify the original demonstrations.

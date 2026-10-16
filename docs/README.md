@@ -16,6 +16,7 @@ steps in the guides.
 | Older TAPIR workflows | `scripts/setup/linux_setup.sh` / `windows_setup.ps1` | [TAPIR commands](legacy/TAPNET_COMMANDS.md) |
 | Point label collection | `requirements.txt` labeling profile | [Molmo gripper point dataset](molmo_gripper_point_data.md) |
 | JEPA segmentation and hierarchical captions | `scripts/setup/linux_setup.sh --profile annotation` | [Episode annotation](episode_annotation.md) |
+| Claude text aggregation from Hub or local caption trees | Existing annotation environment; no GPU needed to run | [Aggregation commands](episode_annotation.md#run-aggregation) |
 
 Short workflow guides:
 

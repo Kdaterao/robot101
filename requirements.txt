@@ -65,7 +65,7 @@ SAM-2 @ git+https://github.com/facebookresearch/sam2.git@main
 #| timm>=1,<2
 #| pyyaml>=6
 #| tqdm>=4.66
-#| anthropic>=0.75,<1
+#| anthropic>=0.125,<1
 
 # [profile:viewer]
 #| datasets>=3,<5

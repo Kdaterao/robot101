@@ -56,6 +56,10 @@ def build_parser():
     p.add_argument("--video-batch-size", type=int, default=1)
     p.add_argument("--image-batch-size", type=int, default=1)
     p.add_argument("--max-caption-tokens", type=int, default=1024)
+    p.add_argument("--gripper-hints", action=argparse.BooleanOptionalAction, default=True,
+                   help="Provide likely gripper positions/transitions from recorded state to captioners")
+    p.add_argument("--gripper-open-direction", choices=["increasing", "decreasing"], default="increasing",
+                   help="Whether larger gripper values indicate opening")
     add_hub_arguments(p)
     return p
 
@@ -94,7 +98,8 @@ def resolve_run(args):
                 image=api.model_info(args.image_model, revision=args.image_revision).sha)
     record = dict(schema_version=SCHEMA_VERSION, fingerprint=key, requested=requested, resolved=refs,
                   method="Action100M adaptation", bounds="half_open_source_frames", fps=float(metadata.fps),
-                  total_episodes=int(metadata.total_episodes), prompts_version="neutral-detailed-v1")
+                  total_episodes=int(metadata.total_episodes),
+                  prompts_version="gripper-sensor-context-v2" if args.gripper_hints else "neutral-detailed-v1")
     atomic_json(path, record)
     return record
 
@@ -198,6 +203,7 @@ def episode_timer(record, phase):
 def caption_records(args, run, records, source, kind, worker_factory):
     from PIL import Image
     from robot101.perception.annotation_models import release
+    from robot101.data.utilities.gripper_hints import build_gripper_hints
     worker = None
     batch_size = args.video_batch_size if kind == "video" else args.image_batch_size
     try:
@@ -208,9 +214,13 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     if node["caption_kind"] != kind:
                         continue
                     indices = uniform_frames(node, args.video_frames) if kind == "video" else [midpoint(node)]
+                    hints = (build_gripper_hints(record, node, indices, kind=kind,
+                                 open_direction=args.gripper_open_direction) if args.gripper_hints else None)
+                    prompt_version = "gripper-sensor-context-v2" if args.gripper_hints else "neutral-detailed-v1"
                     key = fingerprint(dict(segment=record["fingerprint"], node=node, model=run["resolved"][kind],
                                            model_id=args.video_model if kind == "video" else args.image_model,
-                                           sample_frames=indices, tokens=args.max_caption_tokens, prompt="neutral-detailed-v1",
+                                           sample_frames=indices, tokens=args.max_caption_tokens, prompt=prompt_version,
+                                           gripper_hints=hints,
                                            dtype=args.dtype, adapter="direct-frames-metadata-v2"))
                     path = args.output_dir / "node_captions" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
                     cached = cached_json(path, key, args.resume)
@@ -256,7 +266,9 @@ def caption_records(args, run, records, source, kind, worker_factory):
                             frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
                         requests.append(dict(frames=np.stack(frames), fps=record["fps"],
                                              frame_indices=[i - node["start_frame"] for i in ids],
-                                             total_num_frames=node["end_frame"] - node["start_frame"]))
+                                             total_num_frames=node["end_frame"] - node["start_frame"],
+                                             gripper_hints=(build_gripper_hints(record, node, ids, kind=kind,
+                                                 open_direction=args.gripper_open_direction) if args.gripper_hints else None)))
                         valid_jobs.append((node, ids, path, key))
                     if not valid_jobs:
                         continue
@@ -272,10 +284,13 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     except Exception as exc:
                         results = [dict(status="failed", error=str(exc)) for _ in valid_jobs]
                     seconds = perf_counter() - start
-                    for (node, ids, path, key), result in zip(valid_jobs, results, strict=True):
+                    for (node, ids, path, key), request, result in zip(valid_jobs, requests, results, strict=True):
                         result.update(fingerprint=key, kind=kind, sample_frames=ids,
                                       sample_timestamps=[data["timestamps"][i] for i in ids],
                                       model_revision=run["resolved"][kind], seconds=seconds / len(valid_jobs))
+                        if request["gripper_hints"] is not None:
+                            result["gripper_hints"] = request["gripper_hints"]
+                        result["prompt_version"] = prompt_version
                         result.setdefault("status", "ok")
                         atomic_json(path, result)
                         node["caption"] = result
