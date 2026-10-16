@@ -106,13 +106,20 @@ class Captioner:
             if request.get("gripper_hints") is not None:
                 import json
                 prompt += (
-                    "\nRecorded gripper sensor context follows. Positions are normalized within this episode, "
-                    "not calibrated physical jaw widths. Use these as likely open/closed/transition hints, "
-                    "and describe what the imagery actually supports. Closing alone does not prove grasp "
-                    "or object contact; opening alone does not prove object release or task success. "
+                    "\nBase the action description on visual evidence: describe the object's position and motion "
+                    "relative to the gripper and support surface. Distinguish an attempted grasp from holding an object. "
+                    "For video, a successful grasp needs positive visual evidence such as the object being retained "
+                    "between the fingers and moving with the gripper; jaw closure is not that evidence. "
+                    "For a single image, report visible object/finger geometry without inventing a grasp sequence. "
+                    "When retention or contact is occluded or unclear, leave it unresolved rather than inferring success or failure. "
+                    "Only after describing the visual action, optionally use the sensor context below to clarify jaw "
+                    "posture or mechanical timing. Never use it to choose the object, decide grasp success, holding, "
+                    "object transport, release, placement or task completion. A gripper can close on empty space, "
+                    "or open when it was not holding anything. Do not repeat the sensor timeline as the main caption. "
+                    "Positions are normalized within this episode, not calibrated physical jaw widths. "
                     "Hints refer to the stated source frames; changing states at different times can be a normal action sequence. "
                     "If the signal is unavailable or ambiguous, say so rather than asserting a jaw state. "
-                    "For an image, describe only the visible instant, not motion across the whole interval.\n" +
+                    "Sensor context (jaw posture/timing only):\n" +
                     json.dumps(request["gripper_hints"], separators=(",", ":")))
             conversations.append([{"role": "user", "content": [
                 {"type": self.kind}, {"type": "text", "text": prompt}]}])

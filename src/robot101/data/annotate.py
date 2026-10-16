@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from contextlib import contextmanager
+from robot101.data.utilities.gripper_hints import GRIPPER_PROMPT_VERSION
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,7 @@ def resolve_run(args):
     requested = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
                  if k not in {"episodes", "stage", "resume", "output_dir", "download_workers",
                               "push_to_hub", "dst_repo_id", "hub_private"}}
+    requested["caption_prompt_version"] = GRIPPER_PROMPT_VERSION if args.gripper_hints else "neutral-detailed-v1"
     path = args.output_dir / "run.json"
     key = fingerprint(requested)
     existing = cached_json(path, key, args.resume)
@@ -99,7 +101,7 @@ def resolve_run(args):
     record = dict(schema_version=SCHEMA_VERSION, fingerprint=key, requested=requested, resolved=refs,
                   method="Action100M adaptation", bounds="half_open_source_frames", fps=float(metadata.fps),
                   total_episodes=int(metadata.total_episodes),
-                  prompts_version="gripper-sensor-context-v2" if args.gripper_hints else "neutral-detailed-v1")
+                  prompts_version=requested["caption_prompt_version"])
     atomic_json(path, record)
     return record
 
@@ -216,7 +218,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     indices = uniform_frames(node, args.video_frames) if kind == "video" else [midpoint(node)]
                     hints = (build_gripper_hints(record, node, indices, kind=kind,
                                  open_direction=args.gripper_open_direction) if args.gripper_hints else None)
-                    prompt_version = "gripper-sensor-context-v2" if args.gripper_hints else "neutral-detailed-v1"
+                    prompt_version = GRIPPER_PROMPT_VERSION if args.gripper_hints else "neutral-detailed-v1"
                     key = fingerprint(dict(segment=record["fingerprint"], node=node, model=run["resolved"][kind],
                                            model_id=args.video_model if kind == "video" else args.image_model,
                                            sample_frames=indices, tokens=args.max_caption_tokens, prompt=prompt_version,

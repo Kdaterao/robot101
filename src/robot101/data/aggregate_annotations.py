@@ -14,7 +14,7 @@ from robot101.data.utilities.annotation_tree import (
 )
 from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
-PROMPT_VERSION = "action100m-robotics-v2-gripper-context"
+PROMPT_VERSION = "action100m-robotics-v3-visual-evidence"
 STRING_FIELDS = ("brief_action", "detailed_action", "actor", "brief_caption", "detailed_caption")
 ROBOTICS_FIELDS = ("manipulated_object", "destination", "completion_condition")
 
@@ -76,6 +76,9 @@ def request_prompt(evidence, previous=None):
         "evidence requires review. Do not invent objects, successful outcomes, pixel points or masks. "
         "Completion condition describes a desired outcome, not a success verdict. "
         "Recorded gripper hints are measured episode-relative positions, not proof of grasp/contact or release of an object. "
+        "Use sensor hints only for jaw posture/timing. Do not promote closure into successful grasp, holding or transport, "
+        "or opening into object release/placement. These claims need explicit visual observations in the supplied captions. "
+        "If a caption's only support for grasp success is the sensor hint, preserve it as uncertain rather than accepting it. "
         "Compare observations at their source frames: open followed by closed can be a normal transition, not a contradiction. "
         "A midpoint image is an instant and cannot establish that an entire interval was stationary. "
         "An approach subtask need not complete the episode-level placement goal; missing placement alone is not a conflict. "

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 
+GRIPPER_PROMPT_VERSION = "visual-first-gripper-context-v3"
+
 
 def build_gripper_hints(record, node, frame_ids, *, kind, open_direction="increasing"):
     """Likely positions, not calibrated jaw widths or successful-grasp labels."""
@@ -11,11 +13,12 @@ def build_gripper_hints(record, node, frame_ids, *, kind, open_direction="increa
     frames = [int(i) for i in frame_ids]
     fps = float(record["fps"])
     origin = frames[0] if frames else node["start_frame"]
-    context = dict(version="episode-relative-gripper-v1", source="observation.state gripper",
+    context = dict(version="episode-relative-gripper-v2", source="observation.state gripper",
                    open_direction=open_direction, available=False,
                    node_bounds=[node["start_frame"], node["end_frame"]],
                    time_reference="source episode; clip times are relative to the first sampled frame",
                    clip_origin_frame=origin,
+                   allowed_use="Jaw posture and mechanical timing only; never evidence that an object was grasped, held, moved or released.",
                    warning="Episode-relative position hints only; not proof of contact, grasp, release of an object, or task success.",
                    states=[], transitions=[])
     raw = record.get("gripper")

@@ -167,6 +167,20 @@ opening does not prove release of an object or task completion. No sensor text
 is burned into the clean images or videos. Hint provenance is saved with each
 caption and passed to Haiku as evidence; JEPA boundaries stay unchanged.
 
+Caption prompts explicitly prioritize visible object/finger geometry and object
+motion over telemetry. Sensor hints may clarify jaw posture/timing only; they
+must not establish object identity, grasp success, holding, transport or placement.
+For video, an object retained between the fingers and moving with the gripper is
+positive visual evidence; closure alone is not. Occlusion leaves success/failure
+unresolved. Single images must not invent a grasp sequence. Haiku follows the
+same distinction when standardizing captions. These are prompting safeguards,
+not a guarantee that the VLM will obey them: compare outputs on the same episodes
+with `--no-gripper-hints` before choosing which labels to keep.
+
+The visual-first caption and aggregation prompts are versioned. Use fresh output
+directories after this update; old sensor-biased captions are not rewritten by
+resuming their cached run. Compatible JEPA caches remain reusable.
+
 ```bash
 python -m robot101.data.annotate --episodes 0 \
   --output-dir outputs/annotations_gripper_hints \
