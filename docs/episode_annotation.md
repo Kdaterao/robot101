@@ -167,6 +167,8 @@ is supplied as visual helper context by default, an explicit robotics adaptation
 
 The default caption prompt is restored to the original neutral instruction:
 **“Describe this video in detail.”** or **“Describe this image in detail.”**
+It also asks the model to focus on observable interactions between the robotic
+arm and scene objects, rather than only inventorying objects or describing posture.
 Camera labels and snapshot timestamps identify the inputs. When a helper view is
 present, a short explanation identifies it as a wrist-mounted view of the same
 scene, useful for local contact/holding/release observations. It explains that
