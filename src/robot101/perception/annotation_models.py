@@ -111,12 +111,6 @@ class Captioner:
         for request in requests:
             # Original neutral caption instruction, before later robotics prompt revisions.
             prompt = "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."
-            if self.kind == "video":
-                prompt += (
-                    " Compare the beginning, middle and end of the clip. Describe changes in the arm's "
-                    "position relative to scene objects and changes in contact or holding. Do not judge "
-                    "the whole clip from one frame."
-                )
             prompt += (
                 " Focus on how the robotic arm interacts with objects in the scene: its movement "
                 "relative to them, visible contact, grasping, holding, moving objects and releasing them, "
@@ -140,6 +134,14 @@ class Captioner:
                     + json.dumps(previous) + "\n"
                 )
             views = request.get("views") or [dict(camera="primary", role="primary", frames=request["frames"])]
+            if request.get("episode_has_no_pov") and not any(view.get("role") == "helper" for view in views):
+                prompt += (
+                    "\nThis episode has no available wrist/POV view. Use the third-person view alone to "
+                    "assess how the gripper interacts with scene objects, including visible contact, "
+                    "grasping, holding, moving and releasing objects. POV confirmation is not required. "
+                    "Base the description on what this view shows; qualify interactions hidden by "
+                    "occlusion or insufficient detail rather than inventing them."
+                )
             if any(view.get("role") == "helper" for view in views):
                 prompt += (
                     "\nThe helper POV is a wrist-mounted camera looking toward the robot's gripper. "

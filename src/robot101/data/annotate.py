@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "description-temporal-comparison-tools-pov-v24"
+CAPTION_PROMPT_VERSION = "description-episode-no-pov-v25"
 
 
 def build_parser():
@@ -289,6 +289,10 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                     if args.helper_view and args.helper_camera != args.camera:
                         cameras.append(args.helper_camera)
                     data = load_episode_metadata(ds, cameras, preserve_auxiliary=False)
+                    # Determine episode-wide absence before decode failures can
+                    # change availability masks. Missing node samples are separate.
+                    episode_has_no_pov = (args.helper_view and args.helper_camera != args.camera
+                                          and not bool(np.any(data["masks"][args.helper_camera])))
                     record["caption_timings"][f"{kind}_metadata_seconds"] = perf_counter() - start
                     start = perf_counter()
                     indices = sorted({i for _, ids, _, _ in jobs for i in ids})
@@ -359,6 +363,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                               media_kind="image_sequence" if kind == "video" and camera != args.camera else kind,
                                               role="primary" if camera == args.camera else "helper"))
                         requests.append(dict(frames=views[0]["frames"], views=views, fps=record["fps"],
+                                             episode_has_no_pov=episode_has_no_pov,
                                              clip_start_timestamp=data["timestamps"][node["start_frame"]],
                                              is_final_subtask=node["id"] == final_subtask_id,
                                              frame_indices=[i - node["start_frame"] for i in ids],
@@ -394,6 +399,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                                image_subdir="" if view["role"] == "primary" else view["camera"])
                                            for view in request["views"]]
                         result["helper_status"] = request["helper_status"]
+                        result["episode_has_no_pov"] = request["episode_has_no_pov"]
                         result["previous_subtask"] = request["previous_subtask"]
                         result["is_final_subtask"] = request["is_final_subtask"]
                         result["prompt_version"] = prompt_version

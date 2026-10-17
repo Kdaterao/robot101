@@ -167,9 +167,6 @@ is supplied as visual helper context by default, an explicit robotics adaptation
 
 The default caption prompt is restored to the original neutral instruction:
 **“Describe this video in detail.”** or **“Describe this image in detail.”**
-For video only, it also asks the model to compare the beginning, middle and end,
-describe changes in arm position relative to objects and in contact/holding, and
-avoid judging the whole clip from one frame.
 It also asks the model to focus on observable interactions between the robotic
 arm and scene objects, rather than only inventorying objects or describing posture.
 This includes visible tool-mediated interactions: distinguish a held tool from
@@ -232,6 +229,12 @@ these settings; both settings are included in run and caption cache fingerprints
 
 The POV frames are still supplied as additional visual inputs. Gripper events
 select images, but gripper values and open/closed labels are not sent to Qwen.
+If episode metadata indicates no available POV frames anywhere in the episode,
+the prompt explicitly asks for gripper/object interaction assessment using the
+third-person view alone. This does not trigger merely because one node's POV
+samples are missing, decoding fails, or helper input is disabled. The flag
+`episode_has_no_pov` is saved with each caption. Occluded interactions remain
+uncertain rather than being invented. Use a new output directory for this prompt.
 The prompt briefly explains camera roles without imposing an action sequence.
 Without detected events, video nodes still get endpoint
 snapshots. A token cap is a maximum, not a target; captions can finish below it.
