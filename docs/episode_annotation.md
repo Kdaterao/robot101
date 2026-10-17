@@ -4,8 +4,8 @@ This is an **Action100M adaptation**, not an exact reproduction. It preserves
 temporal Ward hierarchies and the Tree-of-Captions: midpoint image captions on
 retained leaves, video captions on retained internal nodes, and text aggregation
 using descendant and root context. It substitutes V-JEPA **2.1 ViT-L**, Qwen3-VL
-**8B**, and Claude **Haiku** for the paper's encoder/image/aggregation models.
-Qwen3-VL-8B-Instruct supplies both internal-node video captions and leaf-image
+**32B**, and Claude **Haiku** for the paper's encoder/image/aggregation models.
+Qwen3-VL-32B-Instruct supplies both internal-node video captions and leaf-image
 captions, using SDPA in both passes. This further
 model substitution needs quality and runtime evaluation; a speedup is not assumed.
 
@@ -24,7 +24,7 @@ hf auth login
 ```
 
 Both video and image captions default to
-[Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct).
+[Qwen3-VL-32B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct).
 Use a new output directory when switching models; existing run configurations
 and caption caches cannot be resumed under the new default.
 PerceptionLM access is unnecessary for the default Qwen configuration. Model downloads
@@ -92,7 +92,7 @@ captions are retried. Incompatible settings require another output directory.
 | `--max-segments` | `8` | Largest candidate count for the exported subtask cut |
 | `--silhouette-threshold` | `0.15` | Minimum score for a multi-subtask cut |
 | `--jepa-ref` | `main`, resolved once | Official JEPA repository ref |
-| `--video-model`, `--image-model` | Qwen/Qwen3-VL-8B-Instruct for both | Caption model IDs |
+| `--video-model`, `--image-model` | Qwen/Qwen3-VL-32B-Instruct for both | Caption model IDs |
 | `--video-revision`, `--image-revision` | `main`, resolved once | Model revisions |
 | `--dtype` | `bf16` | Inference dtype |
 
@@ -177,9 +177,38 @@ present, a short explanation identifies it as a wrist-mounted view of the same
 scene, useful for local contact/holding/release observations. It explains that
 the camera moves with the arm and that object visibility alone does not prove
 holding. Later action-evidence, idle and final-subtask instructions have been
-removed. Both caption passes use Qwen3-VL-8B-Instruct. Current frame sampling,
+removed. Both caption passes use Qwen3-VL-32B-Instruct. Current frame sampling,
 batching and hardware/timing reporting are retained. Use a new output directory
 for this prompt version; old run configurations cannot resume under it.
+
+### 32B on a 48 GB GPU
+
+Both caption passes default to Qwen3-VL-32B-Instruct with **4-bit NF4** weights
+(`--caption-quantization 4bit`). Compute uses `--dtype` (BF16 by default); the
+Qwen vision module and output head are excluded from 4-bit conversion. JEPA is
+unchanged. Passes still run sequentially, releasing each model before the next.
+The annotation Linux profile includes bitsandbytes; rerun its setup on an existing
+VM to install it:
+
+```bash
+bash scripts/setup/linux_setup.sh --profile annotation
+source .venv-annotation/bin/activate
+python -m robot101.data.annotate --episodes 0 \
+  --output-dir outputs/annotations_qwen32b_test \
+  --video-batch-size 1 --image-batch-size 1 --max-caption-tokens 512
+```
+
+Start at batch size **1**, not the old 24, and measure peak VRAM before increasing
+it. Quantization does not bound video/POV activation or generation memory, and
+quality/runtime need evaluation. The first run downloads the full base checkpoint
+before quantizing it during loading. GPU placement is explicit; no CPU offloading
+is selected. `--caption-quantization none` restores full-precision loading and
+requires enough memory for the 32B weights plus inference. For the old 8B baseline,
+override both model IDs and set `--caption-quantization none`.
+
+Use a new output directory. Run and caption caches record quantization; caption
+sidecars also save it. Existing unquantized/8B results cannot be reused as 32B
+results.
 
 ### Previous-subtask context
 

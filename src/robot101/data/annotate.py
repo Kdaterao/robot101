@@ -62,8 +62,10 @@ def build_parser():
     p.add_argument("--min-duration", type=float, default=0.5)
     p.add_argument("--max-segments", type=int, default=8)
     p.add_argument("--silhouette-threshold", type=float, default=0.15)
-    p.add_argument("--video-model", default="Qwen/Qwen3-VL-8B-Instruct")
-    p.add_argument("--image-model", default="Qwen/Qwen3-VL-8B-Instruct")
+    p.add_argument("--video-model", default="Qwen/Qwen3-VL-32B-Instruct")
+    p.add_argument("--image-model", default="Qwen/Qwen3-VL-32B-Instruct")
+    p.add_argument("--caption-quantization", choices=["4bit", "none"], default="4bit",
+                   help="4-bit caption weights for 48 GB GPUs; none requires more VRAM for 32B")
     p.add_argument("--video-revision", default="main")
     p.add_argument("--image-revision", default="main")
     p.add_argument("--video-frames", type=int, default=32)
@@ -271,7 +273,8 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                            helper_event_frames=args.helper_event_frames,
                                            helper_event_window_seconds=args.helper_event_window_seconds,
                                            helper_camera=args.helper_camera if args.helper_view else None,
-                                           dtype=args.dtype, adapter="direct-frames-metadata-v2"))
+                                           dtype=args.dtype, quantization=args.caption_quantization,
+                                           adapter="direct-frames-metadata-v3"))
                     path = args.output_dir / ("context_captions" if previous_contexts is not None else "node_captions") / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
                     cached = cached_json(path, key, args.resume)
                     if cached and cached.get("status") == "ok":
@@ -403,6 +406,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                         result["previous_subtask"] = request["previous_subtask"]
                         result["is_final_subtask"] = request["is_final_subtask"]
                         result["prompt_version"] = prompt_version
+                        result["quantization"] = args.caption_quantization
                         result.setdefault("status", "ok")
                         if result["status"] != "ok" and batch_error is None:
                             caption_failure_warning(record, kind, [node["id"]], result.get("error", result["status"]))
@@ -446,6 +450,8 @@ def main(argv=None):
 
 def _run(args, usage):
     validate_hub_arguments(args)
+    if args.stage != "segment" and args.caption_quantization == "4bit" and not args.device.startswith("cuda"):
+        raise SystemExit("4-bit captioning requires a CUDA GPU; use --caption-quantization none for other devices")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.helper_camera):
         raise SystemExit("--helper-camera must be a camera name without path separators")
     for name in ("download_workers", "decode_batch_size", "sample_step", "jepa_batch_size", "max_segments",
@@ -519,7 +525,8 @@ def _run(args, usage):
         release(worker)
     def captioner(kind):
         return Captioner(args.video_model if kind == "video" else args.image_model,
-                         run["resolved"][kind], kind, args.device, args.dtype)
+                         run["resolved"][kind], kind, args.device, args.dtype,
+                         quantization=args.caption_quantization)
     try:
         if args.stage != "segment":
             for kind in ("video", "image"):

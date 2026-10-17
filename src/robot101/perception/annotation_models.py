@@ -75,7 +75,7 @@ class JEPAEncoder:
 
 
 class Captioner:
-    def __init__(self, model_id, revision, kind, device="cuda", dtype="bf16"):
+    def __init__(self, model_id, revision, kind, device="cuda", dtype="bf16", quantization="none"):
         import torch
         from transformers import AutoConfig, AutoProcessor, AutoModelForImageTextToText
         self.torch, self.kind, self.device = torch, kind, device
@@ -88,9 +88,29 @@ class Captioner:
         # Keep SDPA on the language model and let timm manage vision attention.
         attention = ({"": "eager", "vision_config": "eager", "text_config": "sdpa"}
                      if config.model_type == "perception_lm" else "sdpa")
+        load_kwargs = {}
+        if quantization == "4bit":
+            if torch.device(device).type != "cuda":
+                raise ValueError("4-bit captioning requires a CUDA GPU")
+            try:
+                import bitsandbytes  # noqa: F401
+            except ImportError as exc:
+                raise RuntimeError("Install the annotation profile's bitsandbytes dependency for 4-bit captioning") from exc
+            from transformers import BitsAndBytesConfig
+            load_kwargs = dict(
+                quantization_config=BitsAndBytesConfig(
+                    load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=self.dtype,
+                    llm_int8_skip_modules=["visual", "lm_head"]),
+                device_map={"": str(torch.device(device))})
+        elif quantization != "none":
+            raise ValueError(f"Unsupported caption quantization: {quantization}")
+        print(f"Loading {kind} captioner {model_id}: {quantization=}, {dtype=}, {device=}", flush=True)
         self.model = AutoModelForImageTextToText.from_pretrained(
             model_id, revision=revision, config=config, torch_dtype=self.dtype,
-            attn_implementation=attention, low_cpu_mem_usage=True).eval().to(device)
+            attn_implementation=attention, low_cpu_mem_usage=True, **load_kwargs).eval()
+        if quantization == "none":
+            self.model = self.model.to(device)
         if kind == "video" and not self.qwen_video:
             # The HF checkpoint's timm tower can have a fixed 448px grid.
             # Adapt its positional embeddings/grid, not just its processor,
