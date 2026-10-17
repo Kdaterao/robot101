@@ -189,6 +189,14 @@ captions, with the exact `previous_subtask` context saved for inspection. Failed
 or truncated preceding captions remain explicitly labeled. This does not change
 segmentation or add gripper-state claims to the prompts.
 
+Prior captions cannot establish a new grasp in the current interval. An object
+already held at the start is a visible state, not proof of a new grasp. When
+little happens, captions describe that interval without recycling earlier actions.
+The final selected subtask is explicitly marked (`is_final_subtask` in caption
+sidecars): the prompt considers withdrawal, return to rest or idle as possibilities,
+without forcing those labels over genuine visible interactions. Use a new output
+directory for this prompt version.
+
 ### Synchronized POV helper view
 
 Captioning uses the primary camera (`--camera top` by default) together with a

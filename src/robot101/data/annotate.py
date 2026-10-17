@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-descriptive-action-evidence-v13"
+CAPTION_PROMPT_VERSION = "multiview-current-evidence-final-subtask-v14"
 
 
 def build_parser():
@@ -235,6 +235,10 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
     try:
         for record in records:
             with episode_timer(record, kind):
+                selected = set(record["selected_node_ids"])
+                final_subtask = max((n for n in record["nodes"] if n["id"] in selected),
+                                    key=lambda n: (n["end_frame"], n["start_frame"]), default=None)
+                final_subtask_id = final_subtask["id"] if final_subtask else None
                 jobs = []
                 for node in record["nodes"]:
                     if node["caption_kind"] != kind:
@@ -250,6 +254,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                            model_id=args.video_model if kind == "video" else args.image_model,
                                            sample_frames=indices, tokens=args.max_caption_tokens, prompt=prompt_version,
                                            previous_subtask=previous_context,
+                                           is_final_subtask=node["id"] == final_subtask_id,
                                            helper_camera=args.helper_camera if args.helper_view else None,
                                            dtype=args.dtype, adapter="direct-frames-metadata-v2"))
                     path = args.output_dir / ("context_captions" if previous_contexts is not None else "node_captions") / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
@@ -335,6 +340,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                               media_kind="image_sequence" if kind == "video" and camera != args.camera else kind,
                                               role="primary" if camera == args.camera else "helper"))
                         requests.append(dict(frames=views[0]["frames"], views=views, fps=record["fps"],
+                                             is_final_subtask=node["id"] == final_subtask_id,
                                              frame_indices=[i - node["start_frame"] for i in ids],
                                              total_num_frames=node["end_frame"] - node["start_frame"],
                                              helper_status=helper_error or helper_status,
@@ -369,6 +375,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                            for view in request["views"]]
                         result["helper_status"] = request["helper_status"]
                         result["previous_subtask"] = request["previous_subtask"]
+                        result["is_final_subtask"] = request["is_final_subtask"]
                         result["prompt_version"] = prompt_version
                         result.setdefault("status", "ok")
                         if result["status"] != "ok" and batch_error is None:
