@@ -184,6 +184,14 @@ for this prompt version; old run configurations cannot resume under it.
 
 ### Caption model loading
 
+The loader checks for missing/mismatched weights and refuses caption generation
+with uninitialized required parameters. For PerceptionLM, configured tied token
+embeddings are also applied to and verified at the output head, including when
+tying is declared on the nested text config. An independently configured output
+head is never replaced with embeddings. This guards against invalid generation;
+GPU evaluation is still required. Use a new output directory after this loader
+change so earlier successful-but-corrupt captions are not reused.
+
 Video defaults to **Perception-LM-3B** and images to **Qwen3-VL-8B-Instruct**,
 with unquantized BF16 weights (`--caption-quantization none`, `--dtype bf16`). The existing prompts,
 POV sampling and hierarchy captioning behavior are unchanged. Use a new output

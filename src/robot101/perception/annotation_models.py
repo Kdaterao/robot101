@@ -83,6 +83,13 @@ class Captioner:
         self.processor = AutoProcessor.from_pretrained(model_id, revision=revision)
         self.processor.tokenizer.padding_side = "left"
         config = AutoConfig.from_pretrained(model_id, revision=revision)
+        plm_tied = config.model_type == "perception_lm" and (
+            bool(getattr(config, "tie_word_embeddings", False)) or
+            bool(getattr(getattr(config, "text_config", None), "tie_word_embeddings", False)))
+        if plm_tied:
+            # Some PLM configs declare tying only on the nested language config.
+            # The conditional-generation wrapper owns lm_head and must see it too.
+            config.tie_word_embeddings = True
         self.qwen_video = kind == "video" and config.model_type in {"qwen2_5_vl", "qwen3_vl"}
         # PerceptionLM's timm wrapper rejects a propagated SDPA setting.
         # Keep SDPA on the language model and let timm manage vision attention.
@@ -106,9 +113,29 @@ class Captioner:
         elif quantization != "none":
             raise ValueError(f"Unsupported caption quantization: {quantization}")
         print(f"Loading {kind} captioner {model_id}: {quantization=}, {dtype=}, {device=}", flush=True)
-        self.model = AutoModelForImageTextToText.from_pretrained(
+        self.model, loading_info = AutoModelForImageTextToText.from_pretrained(
             model_id, revision=revision, config=config, torch_dtype=self.dtype,
-            attn_implementation=attention, low_cpu_mem_usage=True, **load_kwargs).eval()
+            attn_implementation=attention, low_cpu_mem_usage=True,
+            output_loading_info=True, **load_kwargs)
+        if plm_tied:
+            embedding = self.model.get_input_embeddings().weight
+            head = self.model.get_output_embeddings()
+            if head.weight.shape != embedding.shape:
+                raise RuntimeError("PerceptionLM configured tied embeddings have incompatible shapes")
+            # Repair only sharing declared by the checkpoint configuration;
+            # never substitute embeddings for an independently trained head.
+            head.weight = embedding
+            print("PerceptionLM: verified output head shares the input token embeddings", flush=True)
+        missing = list(loading_info.get("missing_keys", []))
+        if plm_tied:
+            missing = [key for key in missing if key != "lm_head.weight"]
+        if missing or loading_info.get("mismatched_keys") or loading_info.get("error_msgs"):
+            raise RuntimeError(
+                f"Caption model did not load all required weights: missing={missing}, "
+                f"mismatched={loading_info.get('mismatched_keys', [])}, "
+                f"errors={loading_info.get('error_msgs', [])}. "
+                "Refusing to generate captions with newly initialized parameters.")
+        self.model.eval()
         if quantization == "none":
             self.model = self.model.to(device)
         if kind == "video" and not self.qwen_video:

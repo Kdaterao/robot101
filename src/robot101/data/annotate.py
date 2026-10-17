@@ -274,7 +274,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                            helper_event_window_seconds=args.helper_event_window_seconds,
                                            helper_camera=args.helper_camera if args.helper_view else None,
                                            dtype=args.dtype, quantization=args.caption_quantization,
-                                           adapter="direct-frames-metadata-v3"))
+                                           adapter="direct-frames-verified-weights-v4"))
                     path = args.output_dir / ("context_captions" if previous_contexts is not None else "node_captions") / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
                     cached = cached_json(path, key, args.resume)
                     if cached and cached.get("status") == "ok":
