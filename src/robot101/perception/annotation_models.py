@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import numpy as np
 
 from robot101.data.utilities.annotation_tree import pool_tokens
@@ -117,13 +118,6 @@ class Captioner:
                 "do not collapse multiple observed steps into one generic action. For an image, give a full "
                 "description of the visible arrangement and interaction at that instant. "
                 "Include all useful supported detail, but do not invent actions or repeat sentences just to add length. "
-                "For video, compare multiple frames before choosing action verbs. When the arm and objects "
-                "change little, describe the robot as remaining mostly still or making only the specific small "
-                "adjustments that are visible. Do not turn a pose, tiny jitter, camera motion or a mostly "
-                "unchanged scene into a claimed reach, approach, grasp, lift or placement. Preserve clearly "
-                "visible small finger movements, contact changes or object movements even when the arm barely "
-                "moves; small motion does not mean no interaction. A detailed caption can describe the visible "
-                "state and spatial relationships without inventing an action sequence. "
                 "The labeled camera views show the same scene at matching source times, not separate actions. "
                 "Use the primary third-person view to describe the overall action, object location and world motion. "
                 "Use the helper POV mainly for local interaction evidence: visible contact, whether an object is "
@@ -139,6 +133,23 @@ class Captioner:
                 "when a relevant action cannot be seen. Do not infer that the whole interval is stationary "
                 "from one unchanged frame."
             )
+            motion = request.get("motion_context")
+            if self.kind == "video" and motion is not None:
+                prompt += (
+                    "\nSupporting measured-state context for this clip follows. Its stillness score is a "
+                    "heuristic from measured coordinate speed and excursion, not a calibrated probability. "
+                    "Higher scores mean less movement; likely_still_fraction is the fraction of valid "
+                    "sample windows below the configured low-motion thresholds. Gripper/finger coordinates "
+                    "are excluded. Read signal_kind: pose coordinates are not confirmed raw joint angles, "
+                    "and unverified coordinates have uncertain meaning. Unavailable or unknown measurements "
+                    "provide no evidence of stillness. Use this only as supporting context for the amount "
+                    "and timing of arm motion, alongside the images. It does not establish movement toward "
+                    "or away from an object, contact, holding, object motion, or task success. Small visible "
+                    "interactions can occur during low arm motion. Keep describing the observed sequence "
+                    "in detail; do not replace it with sensor analysis or quote these scores. "
+                    "Bounds in motion_spans are half-open source-frame intervals within this caption node.\n"
+                    + json.dumps(motion, allow_nan=False, separators=(",", ":"))
+                )
             views = request.get("views") or [dict(camera="primary", role="primary", frames=request["frames"])]
             content = [{"type": "text", "text": prompt}]
             for view in views:

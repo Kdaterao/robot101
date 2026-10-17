@@ -48,6 +48,8 @@ Shared modules live under `data/utilities/`:
 - `destination.py`: destination resume/recovery handling.
 - `validation.py`: episode shape checks, skip reports and statistics validation.
 - `hub_downloads.py`: download concurrency/retry and Windows cache helpers.
+- `joint_motion.py`: heuristic low-motion scores from timestamped joint/state coordinates;
+  inspect episodes with `scripts/inspect_joint_motion.py` ([guide](../docs/joint_motion.md)).
 
 Commands and settings: [Preprocessing](../docs/preprocessing.md) and
 [Molmo gripper point data](../docs/molmo_gripper_point_data.md).

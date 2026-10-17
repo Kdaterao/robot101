@@ -26,6 +26,7 @@ Short workflow guides:
 - [Future JEPA subtask segmentation experiment](jepa_subtask_segmentation.md)
 - [Two-day dataset pipeline MVP plan](dataset_pipeline_mvp_plan.md)
 - [Episode segmentation and annotation commands](episode_annotation.md)
+- [Joint/state stillness inspection](joint_motion.md)
 
 There are two setup entrypoints: `linux_setup.sh` for Ubuntu and
 `windows_setup.ps1` for native Windows PowerShell. Linux defaults to preprocessing;

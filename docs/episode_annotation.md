@@ -204,6 +204,32 @@ helper availability. Primary inspection images retain the existing paths; helper
 images are saved under `images/epXXXXXX/wrist/`. The browser viewer and HTML
 reports display both views with camera labels. Original videos remain clean.
 
+### Measured motion hints
+
+Video captions now receive a per-node stillness summary from measured
+`observation.state` coordinates by default. Gripper/finger/jaw coordinates are
+excluded by name. This is supporting context for arm motion, not evidence of
+grasping, object movement, approach direction or success. Image-only leaf
+captions receive no temporal motion hint. Segmentation is unchanged.
+
+The summary uses only states inside that node, with fixed dataset-wide min/max
+normalization ranges. It records the signal type (joints, pose or unverified
+coordinates), score, valid/unknown counts and temporal motion spans. Missing
+names, invalid ranges or bad samples produce explicit unavailable/unknown
+context rather than presumed stillness. The exact context is saved in each
+caption's `motion_context` sidecar field.
+
+Use `--no-motion-hints` to disable it. Optional controls are
+`--motion-joint-indices 0-5`, `--motion-joint-scales 180`,
+`--motion-window-seconds 1`, `--motion-speed-threshold 0.01`,
+`--motion-excursion-threshold 0.01` and `--motion-max-gap-seconds 0.1`.
+Explicit scales must match the selected coordinates' raw units; omit `180`
+unless that range is appropriate for your data. See [joint_motion.md](joint_motion.md)
+for the heuristic and limitations. Tune thresholds using known idle/moving clips.
+
+Use a new `--output-dir` for these prompts: old run configurations cannot resume
+under the new prompt version. Motion settings are included in caption cache keys.
+
 Use new caption and aggregation output directories for this prompt/input change;
 resuming old sensor-biased captions will not replace them. Compatible JEPA feature
 and segment caches can be reused with the procedure below. For Haiku, use the
@@ -217,13 +243,6 @@ temporal sequence, contact, object movement, appearance and spatial relationship
 Haiku keeps `brief_action`/`brief_caption` short and preserves supported detail
 in `detailed_action`/`detailed_caption`. Prompts ask for useful specificity without
 inventing events or padding the result with repeated sentences.
-
-For low-motion intervals, prompts request comparison across video frames before
-using action verbs. Mostly unchanged scenes should be described as mostly still
-or with only the observed small adjustments, rather than inferred reaching or
-grasping from posture. Clearly visible finger/contact/object changes are still
-reported even if arm movement is small. This is prompt guidance, not a numeric
-motion threshold or a change to segmentation.
 
 Token defaults are unchanged. If a previous command used a 512-token cap, replace
 it with `--max-caption-tokens 2048` for longer Qwen descriptions. For aggregation,

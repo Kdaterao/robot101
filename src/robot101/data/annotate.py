@@ -21,13 +21,14 @@ from robot101.data.utilities.annotation_tree import (
 from robot101.data.utilities.episode_helpers import DEFAULT_SRC, _load_lerobot, _parse_episodes
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
+from robot101.data.utilities.joint_motion import node_motion_context
 
 
 class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-motion-caution-v8"
+CAPTION_PROMPT_VERSION = "multiview-state-motion-context-v9"
 
 
 def build_parser():
@@ -39,6 +40,14 @@ def build_parser():
     p.add_argument("--helper-camera", default="wrist", help="Synchronized auxiliary camera for captioning")
     p.add_argument("--helper-view", action=argparse.BooleanOptionalAction, default=True,
                    help="Include the helper camera in captions; JEPA still uses only --camera")
+    p.add_argument("--motion-hints", action=argparse.BooleanOptionalAction, default=True,
+                   help="Give video captions measured low-motion context; excludes gripper coordinates")
+    p.add_argument("--motion-joint-indices", help="State coordinates, e.g. 0-5; default: named non-gripper coordinates")
+    p.add_argument("--motion-joint-scales", help="Fixed raw-unit normalization ranges; default: dataset min/max")
+    p.add_argument("--motion-window-seconds", type=float, default=1.0)
+    p.add_argument("--motion-speed-threshold", type=float, default=0.01)
+    p.add_argument("--motion-excursion-threshold", type=float, default=0.01)
+    p.add_argument("--motion-max-gap-seconds", type=float, default=0.1)
     p.add_argument("--output-dir", type=Path, default=Path("outputs/annotations"))
     p.add_argument("--stage", choices=["all", "segment", "caption"], default="all")
     p.add_argument("--resume", action="store_true")
@@ -232,6 +241,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                                            model_id=args.video_model if kind == "video" else args.image_model,
                                            sample_frames=indices, tokens=args.max_caption_tokens, prompt=prompt_version,
                                            helper_camera=args.helper_camera if args.helper_view else None,
+                                           motion_config={k: v for k, v in vars(args).items() if k.startswith("motion_")},
                                            dtype=args.dtype, adapter="direct-frames-metadata-v2"))
                     path = args.output_dir / "node_captions" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
                     cached = cached_json(path, key, args.resume)
@@ -308,7 +318,21 @@ def caption_records(args, run, records, source, kind, worker_factory):
                                 frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
                             views.append(dict(camera=camera, frames=np.stack(frames),
                                               role="primary" if camera == args.camera else "helper"))
+                        motion_context = None
+                        if kind == "video" and args.motion_hints:
+                            motion_context = node_motion_context(
+                                data["states"], data["timestamps"], ds.meta,
+                                node["start_frame"], node["end_frame"],
+                                indices=args.motion_joint_indices, explicit_scales=args.motion_joint_scales,
+                                window_seconds=args.motion_window_seconds,
+                                speed_threshold=args.motion_speed_threshold,
+                                excursion_threshold=args.motion_excursion_threshold,
+                                max_gap_seconds=args.motion_max_gap_seconds)
+                            if motion_context["status"] != "ok":
+                                print(f'[MOTION HINT UNAVAILABLE] ep{record["episode_index"]} '
+                                      f'{node["id"]}: {motion_context["reason"]}', flush=True)
                         requests.append(dict(frames=views[0]["frames"], views=views, fps=record["fps"],
+                                             motion_context=motion_context,
                                              frame_indices=[i - node["start_frame"] for i in ids],
                                              total_num_frames=node["end_frame"] - node["start_frame"],
                                              helper_status=helper_error or helper_status))
@@ -340,6 +364,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                                                image_subdir="" if view["role"] == "primary" else view["camera"])
                                            for view in request["views"]]
                         result["helper_status"] = request["helper_status"]
+                        result["motion_context"] = request["motion_context"]
                         result["prompt_version"] = prompt_version
                         result.setdefault("status", "ok")
                         if result["status"] != "ok" and batch_error is None:
@@ -373,6 +398,9 @@ def _run(args, usage):
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
     if args.min_duration < 0 or not np.isfinite(args.min_duration) or not -1 <= args.silhouette_threshold <= 1:
         raise SystemExit("Invalid duration or silhouette threshold")
+    for name in ("motion_window_seconds", "motion_speed_threshold", "motion_excursion_threshold", "motion_max_gap_seconds"):
+        if not np.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
+            raise SystemExit(f"--{name.replace('_', '-')} must be finite and positive")
     windows(1, args.window_frames, args.window_stride)
     os.environ["SO101_HF_DOWNLOAD_WORKERS"] = str(args.download_workers)
     args.output_dir.mkdir(parents=True, exist_ok=True)
