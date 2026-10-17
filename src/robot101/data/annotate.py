@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-current-evidence-final-subtask-v14"
+CAPTION_PROMPT_VERSION = "multiview-grasp-release-evidence-v15"
 
 
 def build_parser():

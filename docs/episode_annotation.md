@@ -197,6 +197,12 @@ sidecars): the prompt considers withdrawal, return to rest or idle as possibilit
 without forcing those labels over genuine visible interactions. Use a new output
 directory for this prompt version.
 
+Prompts give release and loss of hold equal attention to grasping: visible
+separation, leaving an object behind, slipping or dropping should be described
+when supported. Jaw opening alone does not prove release, and an empty gripper
+does not establish a prior grasp. Intentional release versus accidental loss is
+not assumed when the images cannot distinguish them.
+
 ### Synchronized POV helper view
 
 Captioning uses the primary camera (`--camera top` by default) together with a
