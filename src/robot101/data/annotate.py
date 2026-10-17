@@ -58,7 +58,7 @@ def build_parser():
     p.add_argument("--min-duration", type=float, default=0.5)
     p.add_argument("--max-segments", type=int, default=8)
     p.add_argument("--silhouette-threshold", type=float, default=0.15)
-    p.add_argument("--video-model", default="Qwen/Qwen2.5-VL-7B-Instruct")
+    p.add_argument("--video-model", default="Qwen/Qwen3-VL-8B-Instruct")
     p.add_argument("--image-model", default="Qwen/Qwen3-VL-8B-Instruct")
     p.add_argument("--video-revision", default="main")
     p.add_argument("--image-revision", default="main")
@@ -340,6 +340,7 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                               media_kind="image_sequence" if kind == "video" and camera != args.camera else kind,
                                               role="primary" if camera == args.camera else "helper"))
                         requests.append(dict(frames=views[0]["frames"], views=views, fps=record["fps"],
+                                             clip_start_timestamp=data["timestamps"][node["start_frame"]],
                                              is_final_subtask=node["id"] == final_subtask_id,
                                              frame_indices=[i - node["start_frame"] for i in ids],
                                              total_num_frames=node["end_frame"] - node["start_frame"],

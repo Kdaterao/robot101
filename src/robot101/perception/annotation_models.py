@@ -83,7 +83,7 @@ class Captioner:
         self.processor = AutoProcessor.from_pretrained(model_id, revision=revision)
         self.processor.tokenizer.padding_side = "left"
         config = AutoConfig.from_pretrained(model_id, revision=revision)
-        self.qwen_video = kind == "video" and config.model_type == "qwen2_5_vl"
+        self.qwen_video = kind == "video" and config.model_type in {"qwen2_5_vl", "qwen3_vl"}
         # PerceptionLM's timm wrapper rejects a propagated SDPA setting.
         # Keep SDPA on the language model and let timm manage vision attention.
         attention = ({"": "eager", "vision_config": "eager", "text_config": "sdpa"}
@@ -199,7 +199,8 @@ class Captioner:
                         'establish a grasp; the visible relationship must support it.'})
                     for frame, frame_id, stamp in zip(view["frames"], view["sample_frames"],
                                                       view["sample_timestamps"], strict=True):
-                        content.extend([{"type": "text", "text": f'POV source frame {frame_id}, time {stamp:.3f} s.'},
+                        relative = stamp - request.get("clip_start_timestamp", 0)
+                        content.extend([{"type": "text", "text": f'POV source frame {frame_id}, {relative:.3f} s from current clip start (source time {stamp:.3f} s).'},
                                         {"type": "image"}])
                         helper_images.append(frame)
                     continue
@@ -215,10 +216,12 @@ class Captioner:
             # sample another clip or silently resize it to its 448px default.
             video_kwargs = dict(size={"height": 320, "width": 320})
             if self.qwen_video:
-                # Qwen's 14px patches and 2x merge require a 28px grid.
-                # Use 308px (nearest grid below 320), and preserve source
-                # timing so the processor derives the sparse clip's FPS.
-                video_kwargs = dict(size={"shortest_edge": 308 ** 2, "longest_edge": 308 ** 2},
+                # Qwen2.5 uses a 28px grid; Qwen3 uses 32px. Preserve
+                # source timing for their respective video processors.
+                processor = self.processor.video_processor
+                grid = int(processor.patch_size) * int(processor.merge_size)
+                side = (320 // grid) * grid
+                video_kwargs = dict(size={"shortest_edge": side ** 2, "longest_edge": side ** 2},
                                     video_metadata=[dict(fps=r["fps"], frames_indices=r["frame_indices"],
                                                          total_num_frames=r["total_num_frames"])
                                                     for r, _ in flat_views])

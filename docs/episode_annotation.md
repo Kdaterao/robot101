@@ -5,8 +5,8 @@ temporal Ward hierarchies and the Tree-of-Captions: midpoint image captions on
 retained leaves, video captions on retained internal nodes, and text aggregation
 using descendant and root context. It substitutes V-JEPA **2.1 ViT-L**, Qwen3-VL
 **8B**, and Claude **Haiku** for the paper's encoder/image/aggregation models.
-Qwen2.5-VL-7B-Instruct replaces PerceptionLM for internal-node video captions.
-Qwen3-VL-8B-Instruct remains the leaf-image captioner. Both use SDPA. This further
+Qwen3-VL-8B-Instruct supplies both internal-node video captions and leaf-image
+captions, using SDPA in both passes. This further
 model substitution needs quality and runtime evaluation; a speedup is not assumed.
 
 These commands annotate existing LeRobot episodes. They do **not** run Molmo,
@@ -23,7 +23,9 @@ source .venv-annotation/bin/activate
 hf auth login
 ```
 
-The default video model is [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct).
+Both caption models default to [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct).
+Use a new output directory when switching models; existing run configurations
+and caption caches cannot be resumed under the new default.
 PerceptionLM approval is unnecessary for the default configuration. Model downloads
 occur on the first GPU run; package setup does not download weights or start jobs.
 The isolated environment uses Transformers 5.5.4; existing grounding pins remain
@@ -89,7 +91,7 @@ captions are retried. Incompatible settings require another output directory.
 | `--max-segments` | `8` | Largest candidate count for the exported subtask cut |
 | `--silhouette-threshold` | `0.15` | Minimum score for a multi-subtask cut |
 | `--jepa-ref` | `main`, resolved once | Official JEPA repository ref |
-| `--video-model`, `--image-model` | Qwen2.5-VL-7B-Instruct, Qwen3-VL-8B-Instruct | Caption model IDs |
+| `--video-model`, `--image-model` | Qwen3-VL-8B-Instruct for both | Caption model IDs |
 | `--video-revision`, `--image-revision` | `main`, resolved once | Model revisions |
 | `--dtype` | `bf16` | Inference dtype |
 
@@ -149,10 +151,11 @@ constant/weak evidence produces one root span. That cut is a robotics adaptation
 not a method claimed by Action100M. No gripper-event segmentation fallback occurs.
 
 Internal-node video frames are resized to 320×320 and supplied directly without
-temporal resampling. Qwen2.5's processor aligns these to 308×308 for its 28-pixel
-patch/merge grid, an explicit spatial deviation from the paper. Source FPS,
-node duration and sampled indices determine the effective sparse-video FPS;
-Qwen2.5 represents timing using uniform spacing rather than per-frame timestamps.
+temporal resampling. Qwen3's 32-pixel patch/merge grid supports 320×320 directly.
+Source FPS, node duration and sampled indices are supplied to its video processor
+so it can embed clip-relative timestamps. POV snapshots are labeled with both
+source times and clip-relative times. The optional Qwen2.5 override remains
+supported at 308×308 for its 28-pixel grid.
 Very short clips may repeat frame indices to satisfy the
 requested count; the actual indices and timestamps are saved. Episode task text
 is not used to imply observed actions or success. A synchronized wrist/POV view
