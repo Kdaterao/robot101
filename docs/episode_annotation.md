@@ -183,6 +183,15 @@ scene filler and success/failure audits. A token cap is a maximum, not a target;
 untruncated captions can finish well below it. This prompt change requires new
 caption and aggregation output directories.
 
+Approach labels require an observable decrease in gripper/end-effector distance
+to the same target across primary-view frames. Pointing, hovering, arm motion
+alone, jaw changes or POV enlargement do not establish approach. If separation
+stays unchanged, captions describe the actual movement/posture; if depth or
+occlusion makes it unclear, they use neutral spatial wording. Single midpoint
+images cannot establish an approach. Haiku applies the same evidence rule when
+standardizing captions. This is a prompt constraint, not a measured 3D-distance
+check; model compliance still needs visual inspection.
+
 ```bash
 python -m robot101.data.annotate --episodes 0 \
   --output-dir outputs/annotations_pov_helper \
