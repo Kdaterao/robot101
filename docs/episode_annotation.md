@@ -218,6 +218,13 @@ Haiku keeps `brief_action`/`brief_caption` short and preserves supported detail
 in `detailed_action`/`detailed_caption`. Prompts ask for useful specificity without
 inventing events or padding the result with repeated sentences.
 
+For low-motion intervals, prompts request comparison across video frames before
+using action verbs. Mostly unchanged scenes should be described as mostly still
+or with only the observed small adjustments, rather than inferred reaching or
+grasping from posture. Clearly visible finger/contact/object changes are still
+reported even if arm movement is small. This is prompt guidance, not a numeric
+motion threshold or a change to segmentation.
+
 Token defaults are unchanged. If a previous command used a 512-token cap, replace
 it with `--max-caption-tokens 2048` for longer Qwen descriptions. For aggregation,
 `--max-tokens 4096` leaves room for detailed fields and diagnostics. These are

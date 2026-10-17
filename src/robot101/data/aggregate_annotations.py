@@ -14,7 +14,7 @@ from robot101.data.utilities.annotation_tree import (
 )
 from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
-PROMPT_VERSION = "action100m-robotics-v7-detailed-description"
+PROMPT_VERSION = "action100m-robotics-v8-motion-caution"
 STRING_FIELDS = ("brief_action", "detailed_action", "actor", "brief_caption", "detailed_caption")
 ROBOTICS_FIELDS = ("manipulated_object", "destination", "completion_condition")
 
@@ -79,6 +79,10 @@ def request_prompt(evidence, previous=None):
         "Use connected prose or paragraphs rather than collapsing the evidence into a generic one-line summary. "
         "Add specificity from the evidence, not repetition or invented details. Put conflicts, uncertainty audits "
         "and critique in their designated fields rather than letting them replace the detailed description. "
+        "When temporal captions describe little change, retain mostly-still or small-adjustment descriptions "
+        "rather than upgrading them to reaching, grasping, lifting or placement based on posture or task intent. "
+        "Preserve specific visible small finger/contact/object changes; limited arm motion does not rule out "
+        "interaction. Do not interpret an isolated midpoint image as evidence of stillness throughout a video. "
         "The task is intended context, not proof of observed success. Missing, truncated, conflicting or uncertain "
         "evidence requires review. Do not invent objects, successful outcomes, pixel points or masks. "
         "Completion condition describes a desired outcome, not a success verdict. "

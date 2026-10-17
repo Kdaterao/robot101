@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-detailed-description-v7"
+CAPTION_PROMPT_VERSION = "multiview-motion-caution-v8"
 
 
 def build_parser():
