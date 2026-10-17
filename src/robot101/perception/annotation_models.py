@@ -126,6 +126,14 @@ class Captioner:
                 "Use the primary third-person view to describe the overall action, object location and world motion. "
                 "Use the helper POV mainly for local interaction evidence: visible contact, whether an object is "
                 "between the fingers, or whether it visibly separates from them. The wrist camera moves with the arm. "
+                "Inspect every provided POV snapshot for the object and its relationship to the fingers. "
+                "POV is direct visual evidence for local interaction, not optional background: use the view "
+                "that shows the fingers/object relationship most clearly. Clear POV evidence of contact, "
+                "an object held between the fingers, or separation does not also need to be visible in the "
+                "third-person view. If the third-person view is occluded, do not disregard the clearer POV. "
+                "When relevant, state the observed POV relationship in the caption and use it to support "
+                "the action or holding state. An object merely appearing somewhere in the POV does not "
+                "establish a grasp; distinguish an object between the fingers from one on the surface nearby. "
                 "An object moving upward, growing larger or shifting sideways in the POV can be caused entirely "
                 "by camera motion; this does not establish that the object was lifted or moved. "
                 "Do not infer object translation, lifting, transport or direction from POV image motion alone. "
@@ -151,7 +159,7 @@ class Captioner:
                 "of an object, and accidental loss of hold; opening alone does not prove release, and an "
                 "empty gripper alone does not prove that an object was previously held. Support a release "
                 "or loss-of-hold claim with current-interval observations of the held/contact state changing "
-                "to separation, using the primary view and POV snapshots together. If separation is visible "
+                "to separation in whichever supplied view shows it clearly. If separation is visible "
                 "but intention is unclear, describe it without assuming a deliberate release or an accident. "
                 "When little happens in the current interval, describe the visible pause, posture or small "
                 "adjustment; do not fill the caption by retelling actions from earlier subtasks. Prefer a "
@@ -186,7 +194,9 @@ class Captioner:
                     content.append({"type": "text", "text":
                         f'Helper POV snapshots: {view["camera"]}. These are sparse interaction checks at '
                         'clip endpoints and possible gripper-change times, not a continuous video. '
-                        'Selection does not establish contact or a successful grasp; use visible evidence.'})
+                        'Inspect the object/finger relationship in EACH image and use clear contact, holding '
+                        'or separation evidence even if hidden in the primary view. Selection alone does not '
+                        'establish a grasp; the visible relationship must support it.'})
                     for frame, frame_id, stamp in zip(view["frames"], view["sample_frames"],
                                                       view["sample_timestamps"], strict=True):
                         content.extend([{"type": "text", "text": f'POV source frame {frame_id}, time {stamp:.3f} s.'},

@@ -227,8 +227,14 @@ Raw gripper metadata remains in episode sidecars for diagnostics.
 The old `--gripper-hints` and `--gripper-open-direction` options are removed.
 
 The POV helper is restricted to local interaction cues (visible contact,
-object/finger relationships or separation). Its camera moves with the robot;
-an object moving upward in that image does not establish an object lift. World
+object/finger relationships or separation).
+The model is instructed to inspect every supplied POV snapshot and use clear
+local contact/holding/separation evidence even when the primary view is occluded.
+Both cameras need not independently show that relationship. Merely seeing an
+object in the POV does not establish that the fingers hold it. World motion still
+requires the primary view. This prompt version requires a new output directory.
+The wrist camera moves with the robot; an object moving upward in that image
+does not establish an object lift. World
 motion, lifting and translation must be supported by the primary third-person
 view. Prompts request detailed, concrete observed actions while excluding generic
 scene filler and success/failure audits. A token cap is a maximum, not a target;
