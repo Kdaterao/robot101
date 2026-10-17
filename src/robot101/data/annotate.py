@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-pov-event-bursts-v17"
+CAPTION_PROMPT_VERSION = "multiview-scene-motion-evidence-v19"
 
 
 def build_parser():

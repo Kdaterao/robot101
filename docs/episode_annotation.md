@@ -241,6 +241,10 @@ The old `--gripper-hints` and `--gripper-open-direction` options are removed.
 
 The POV helper is restricted to local interaction cues (visible contact,
 object/finger relationships or separation).
+Clear third-person observations alone can establish scene-relative arm movement,
+including approach, withdrawal or movement toward a location. POV corroboration
+is not required for those movements. This does not establish contact, grasping,
+holding or release; those require their own visible interaction evidence.
 The model is instructed to inspect every supplied POV snapshot and use clear
 local contact/holding/separation evidence even when the primary view is occluded.
 Both cameras need not independently show that relationship. Merely seeing an
