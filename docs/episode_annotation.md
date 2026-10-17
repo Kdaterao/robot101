@@ -5,9 +5,8 @@ temporal Ward hierarchies and the Tree-of-Captions: midpoint image captions on
 retained leaves, video captions on retained internal nodes, and text aggregation
 using descendant and root context. It substitutes V-JEPA **2.1 ViT-L**, Qwen3-VL
 **8B**, and Claude **Haiku** for the paper's encoder/image/aggregation models.
-Perception-LM-3B supplies internal-node video captions; Qwen3-VL-8B-Instruct
-supplies leaf-image captions. PLM uses SDPA for its text model and eager vision
-attention; Qwen uses SDPA. This further
+Qwen3-VL-8B-Instruct supplies both internal-node video captions and leaf-image
+captions, using SDPA in both passes. This further
 model substitution needs quality and runtime evaluation; a speedup is not assumed.
 
 These commands annotate existing LeRobot episodes. They do **not** run Molmo,
@@ -24,12 +23,11 @@ source .venv-annotation/bin/activate
 hf auth login
 ```
 
-Video captions default to [Perception-LM-3B](https://huggingface.co/facebook/Perception-LM-3B);
-image captions use [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct).
+Both video and image captions default to
+[Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct).
 Use a new output directory when switching models; existing run configurations
 and caption caches cannot be resumed under the new default.
-PerceptionLM is gated: the Hugging Face account used by `hf auth login` needs
-access approval on the model page before the first download. Model downloads
+PerceptionLM access is unnecessary for the default Qwen configuration. Model downloads
 occur on the first GPU run; package setup does not download weights or start jobs.
 The isolated environment uses Transformers 5.5.4; existing grounding pins remain
 unchanged. The first run resolves dataset/model references and the official JEPA
@@ -94,7 +92,7 @@ captions are retried. Incompatible settings require another output directory.
 | `--max-segments` | `8` | Largest candidate count for the exported subtask cut |
 | `--silhouette-threshold` | `0.15` | Minimum score for a multi-subtask cut |
 | `--jepa-ref` | `main`, resolved once | Official JEPA repository ref |
-| `--video-model`, `--image-model` | facebook/Perception-LM-3B, Qwen/Qwen3-VL-8B-Instruct | Caption model IDs |
+| `--video-model`, `--image-model` | Qwen/Qwen3-VL-8B-Instruct for both | Caption model IDs |
 | `--video-revision`, `--image-revision` | `main`, resolved once | Model revisions |
 | `--dtype` | `bf16` | Inference dtype |
 
@@ -154,9 +152,9 @@ constant/weak evidence produces one root span. That cut is a robotics adaptation
 not a method claimed by Action100M. No gripper-event segmentation fallback occurs.
 
 Internal-node video frames are resized to 320×320 and supplied directly without
-temporal resampling. PerceptionLM's timm vision tower is resized to 320×320;
-POV still images use single 320×320 tiles to match the same tower. If selected
-with `--video-model`, Qwen3 supports 320×320 on its 32-pixel patch/merge grid.
+temporal resampling. Qwen3 supports 320×320 on its 32-pixel patch/merge grid.
+The optional PerceptionLM override resizes its timm tower and POV image tiles
+to 320×320.
 When using Qwen video models, source FPS, node duration and sampled indices
 are supplied to the video processor for temporal metadata. PerceptionLM receives
 the ordered video frames without Qwen's timestamp embeddings. POV snapshots are labeled with both
@@ -171,7 +169,7 @@ The default caption prompt is restored to the original neutral instruction:
 **“Describe this video in detail.”** or **“Describe this image in detail.”**
 Camera labels and snapshot timestamps identify the inputs. Later action-evidence,
 POV interpretation, grasp/release, idle and final-subtask instructions have been
-removed. Video captions use Perception-LM-3B; image captions use Qwen3-VL-8B-Instruct. Current frame sampling,
+removed. Both caption passes use Qwen3-VL-8B-Instruct. Current frame sampling,
 batching and hardware/timing reporting are retained. Use a new output directory
 for this prompt version; old run configurations cannot resume under it.
 
