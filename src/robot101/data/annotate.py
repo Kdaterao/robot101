@@ -62,9 +62,9 @@ def build_parser():
     p.add_argument("--min-duration", type=float, default=0.5)
     p.add_argument("--max-segments", type=int, default=8)
     p.add_argument("--silhouette-threshold", type=float, default=0.15)
-    p.add_argument("--video-model", default="Qwen/Qwen3-VL-32B-Instruct")
-    p.add_argument("--image-model", default="Qwen/Qwen3-VL-32B-Instruct")
-    p.add_argument("--caption-quantization", choices=["4bit", "none"], default="4bit",
+    p.add_argument("--video-model", default="facebook/Perception-LM-3B")
+    p.add_argument("--image-model", default="Qwen/Qwen3-VL-8B-Instruct")
+    p.add_argument("--caption-quantization", choices=["4bit", "none"], default="none",
                    help="4-bit caption weights for 48 GB GPUs; none requires more VRAM for 32B")
     p.add_argument("--video-revision", default="main")
     p.add_argument("--image-revision", default="main")
