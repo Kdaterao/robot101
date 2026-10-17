@@ -5,8 +5,9 @@ temporal Ward hierarchies and the Tree-of-Captions: midpoint image captions on
 retained leaves, video captions on retained internal nodes, and text aggregation
 using descendant and root context. It substitutes V-JEPA **2.1 ViT-L**, Qwen3-VL
 **8B**, and Claude **Haiku** for the paper's encoder/image/aggregation models.
-Qwen3-VL-8B-Instruct supplies both internal-node video captions and leaf-image
-captions, using SDPA in both passes. This further
+Perception-LM-3B supplies internal-node video captions; Qwen3-VL-8B-Instruct
+supplies leaf-image captions. PLM uses SDPA for its text model and eager vision
+attention; Qwen uses SDPA. This further
 model substitution needs quality and runtime evaluation; a speedup is not assumed.
 
 These commands annotate existing LeRobot episodes. They do **not** run Molmo,
@@ -23,10 +24,12 @@ source .venv-annotation/bin/activate
 hf auth login
 ```
 
-Both caption models default to [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct).
+Video captions default to [Perception-LM-3B](https://huggingface.co/facebook/Perception-LM-3B);
+image captions use [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct).
 Use a new output directory when switching models; existing run configurations
 and caption caches cannot be resumed under the new default.
-PerceptionLM approval is unnecessary for the default configuration. Model downloads
+PerceptionLM is gated: the Hugging Face account used by `hf auth login` needs
+access approval on the model page before the first download. Model downloads
 occur on the first GPU run; package setup does not download weights or start jobs.
 The isolated environment uses Transformers 5.5.4; existing grounding pins remain
 unchanged. The first run resolves dataset/model references and the official JEPA
@@ -91,7 +94,7 @@ captions are retried. Incompatible settings require another output directory.
 | `--max-segments` | `8` | Largest candidate count for the exported subtask cut |
 | `--silhouette-threshold` | `0.15` | Minimum score for a multi-subtask cut |
 | `--jepa-ref` | `main`, resolved once | Official JEPA repository ref |
-| `--video-model`, `--image-model` | Qwen3-VL-8B-Instruct for both | Caption model IDs |
+| `--video-model`, `--image-model` | facebook/Perception-LM-3B, Qwen/Qwen3-VL-8B-Instruct | Caption model IDs |
 | `--video-revision`, `--image-revision` | `main`, resolved once | Model revisions |
 | `--dtype` | `bf16` | Inference dtype |
 
@@ -151,9 +154,12 @@ constant/weak evidence produces one root span. That cut is a robotics adaptation
 not a method claimed by Action100M. No gripper-event segmentation fallback occurs.
 
 Internal-node video frames are resized to 320×320 and supplied directly without
-temporal resampling. Qwen3's 32-pixel patch/merge grid supports 320×320 directly.
-Source FPS, node duration and sampled indices are supplied to its video processor
-so it can embed clip-relative timestamps. POV snapshots are labeled with both
+temporal resampling. PerceptionLM's timm vision tower is resized to 320×320;
+POV still images use single 320×320 tiles to match the same tower. If selected
+with `--video-model`, Qwen3 supports 320×320 on its 32-pixel patch/merge grid.
+When using Qwen video models, source FPS, node duration and sampled indices
+are supplied to the video processor for temporal metadata. PerceptionLM receives
+the ordered video frames without Qwen's timestamp embeddings. POV snapshots are labeled with both
 source times and clip-relative times. The optional Qwen2.5 override remains
 supported at 308×308 for its 28-pixel grid.
 Very short clips may repeat frame indices to satisfy the
@@ -161,19 +167,18 @@ requested count; the actual indices and timestamps are saved. Episode task text
 is not used to imply observed actions or success. A synchronized wrist/POV view
 is supplied as visual helper context by default, an explicit robotics adaptation.
 
-Captions explain the visible evidence supporting each described action (temporal
-changes, contact or object relationships), identifying the camera when relevant.
-They describe distinct action phases chronologically, including approach and
-retreat when visible, rather than reducing the caption to a final gripper state.
-Supporting observations are integrated into the action narrative. Rich detail
-is requested without assuming a fixed sequence of actions or adding repetition.
-Image-only captions use visible spatial/contact cues without inventing temporal
-changes. Evidence stays in the caption text. Use a new output directory for this
-prompt version; older caption runs cannot resume with the changed prompt.
+The default caption prompt is restored to the original neutral instruction:
+**“Describe this video in detail.”** or **“Describe this image in detail.”**
+Camera labels and snapshot timestamps identify the inputs. Later action-evidence,
+POV interpretation, grasp/release, idle and final-subtask instructions have been
+removed. Video captions use Perception-LM-3B; image captions use Qwen3-VL-8B-Instruct. Current frame sampling,
+batching and hardware/timing reporting are retained. Use a new output directory
+for this prompt version; old run configurations cannot resume under it.
 
 ### Previous-subtask context
 
-By default, annotation first generates independent captions, then refines only
+Previous-subtask refinement is **off by default**. If explicitly enabled with
+`--previous-subtask-context`, annotation first generates independent captions, then refines only
 selected subtasks after the first using the immediately preceding selected
 subtask's **initial caption**. This snapshot keeps results independent of batch
 order and avoids feeding a chain of revised guesses into later captions. Only
@@ -183,7 +188,7 @@ take priority, and a preceding grasp is not assumed to persist.
 
 This adds up to one caption request per selected subtask after the first, plus
 model loading/decoding for the extra passes. Fixed batch sizes still apply.
-Use `--no-previous-subtask-context` to keep independent captioning only. This
+Leave the flag off to use only the original neutral prompt. This
 requires a new annotation output directory because the prompt/config changed.
 
 Initial captions remain in `node_captions/`; separate resumable results live in
@@ -191,20 +196,6 @@ Initial captions remain in `node_captions/`; separate resumable results live in
 captions, with the exact `previous_subtask` context saved for inspection. Failed
 or truncated preceding captions remain explicitly labeled. This does not change
 segmentation or add gripper-state claims to the prompts.
-
-Prior captions cannot establish a new grasp in the current interval. An object
-already held at the start is a visible state, not proof of a new grasp. When
-little happens, captions describe that interval without recycling earlier actions.
-The final selected subtask is explicitly marked (`is_final_subtask` in caption
-sidecars): the prompt considers withdrawal, return to rest or idle as possibilities,
-without forcing those labels over genuine visible interactions. Use a new output
-directory for this prompt version.
-
-Prompts give release and loss of hold equal attention to grasping: visible
-separation, leaving an object behind, slipping or dropping should be described
-when supported. Jaw opening alone does not prove release, and an empty gripper
-does not establish a prior grasp. Intentional release versus accidental loss is
-not assumed when the images cannot distinguish them.
 
 ### Synchronized POV helper view
 
@@ -230,33 +221,11 @@ each event. `--helper-event-frames 1` restores event-only sampling. More snapsho
 increase visual-token and VRAM usage. Use a new output directory when changing
 these settings; both settings are included in run and caption cache fingerprints.
 
-Prompts ask for observed actions, object movement and spatial relationships,
-without guessing intent or adding grasp-success/failure verdicts. The wrist view
-helps clarify contact and occlusion; it depicts the same scene, not additional
-objects or actions. Gripper values and open/closed labels are not supplied to Qwen or Haiku.
-Events only select POV snapshots; they do not establish interaction or grasp
-success. Without detected events, video nodes still get both endpoint snapshots.
-Raw gripper metadata remains in episode sidecars for diagnostics.
-The old `--gripper-hints` and `--gripper-open-direction` options are removed.
-
-The POV helper is restricted to local interaction cues (visible contact,
-object/finger relationships or separation).
-Clear third-person observations alone can establish scene-relative arm movement,
-including approach, withdrawal or movement toward a location. POV corroboration
-is not required for those movements. This does not establish contact, grasping,
-holding or release; those require their own visible interaction evidence.
-The model is instructed to inspect every supplied POV snapshot and use clear
-local contact/holding/separation evidence even when the primary view is occluded.
-Both cameras need not independently show that relationship. Merely seeing an
-object in the POV does not establish that the fingers hold it. World motion still
-requires the primary view. This prompt version requires a new output directory.
-The wrist camera moves with the robot; an object moving upward in that image
-does not establish an object lift. World
-motion, lifting and translation must be supported by the primary third-person
-view. Prompts request detailed, concrete observed actions while excluding generic
-scene filler and success/failure audits. A token cap is a maximum, not a target;
-untruncated captions can finish well below it. This prompt change requires new
-caption and aggregation output directories.
+The POV frames are still supplied as additional visual inputs. Gripper events
+select images, but gripper values and open/closed labels are not sent to Qwen.
+The restored neutral prompt does not prescribe camera roles or interaction
+interpretations. Without detected events, video nodes still get endpoint
+snapshots. A token cap is a maximum, not a target; captions can finish below it.
 
 ```bash
 python -m robot101.data.annotate --episodes 0 \

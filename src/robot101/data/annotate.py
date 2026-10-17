@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-scene-motion-evidence-v19"
+CAPTION_PROMPT_VERSION = "original-neutral-description-qwen3-v20"
 
 
 def build_parser():
@@ -43,7 +43,7 @@ def build_parser():
                    help="Total centered time window for each POV event burst")
     p.add_argument("--helper-view", action=argparse.BooleanOptionalAction, default=True,
                    help="Include the helper camera in captions; JEPA still uses only --camera")
-    p.add_argument("--previous-subtask-context", action=argparse.BooleanOptionalAction, default=True,
+    p.add_argument("--previous-subtask-context", action=argparse.BooleanOptionalAction, default=False,
                    help="Refine selected captions with the preceding subtask initial caption (extra model calls)")
     p.add_argument("--output-dir", type=Path, default=Path("outputs/annotations"))
     p.add_argument("--stage", choices=["all", "segment", "caption"], default="all")
@@ -62,7 +62,7 @@ def build_parser():
     p.add_argument("--min-duration", type=float, default=0.5)
     p.add_argument("--max-segments", type=int, default=8)
     p.add_argument("--silhouette-threshold", type=float, default=0.15)
-    p.add_argument("--video-model", default="Qwen/Qwen3-VL-8B-Instruct")
+    p.add_argument("--video-model", default="facebook/Perception-LM-3B")
     p.add_argument("--image-model", default="Qwen/Qwen3-VL-8B-Instruct")
     p.add_argument("--video-revision", default="main")
     p.add_argument("--image-revision", default="main")

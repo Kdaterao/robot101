@@ -99,87 +99,18 @@ class Captioner:
             if tower is None or not hasattr(tower, "set_input_size"):
                 raise ValueError("Video captioner needs PerceptionLM with a resizable timm vision tower for 320px inputs")
             tower.set_input_size(img_size=(320, 320))
+            # POV snapshots share the same resized vision tower as video frames.
+            # PLM's image processor otherwise defaults to 448px multi-tile images.
+            self.processor.image_processor.tile_size = 320
+            self.processor.image_processor.max_num_tiles = 1
+            self.processor.image_processor.vision_input_type = "tile"
+            self.processor.image_processor.size = {"height": 320, "width": 320}
 
     def caption(self, requests, max_tokens=1024):
         conversations, flat_views, helper_images = [], [], []
         for request in requests:
-            prompt = (
-                "Describe the visible actions and object movements in detail, in temporal order. "
-                if self.kind == "video" else
-                "Describe the visible objects and their spatial relationships in detail at this instant. "
-            )
-            prompt += (
-                "Be as descriptive and specific as the visible evidence allows. For video, describe the "
-                "whole sequence in chronological order using connected sentences, preserving each distinct "
-                "action phase rather than reporting only a final contact or gripper state. Include visible "
-                "approach, alignment, lowering, opening/closing, contact, lifting, transport, release and "
-                "retreat when they occur; these are possibilities, not a checklist of actions to assume. "
-                "Use concrete action verbs such as 'approaches the battery' when the primary clip supports "
-                "that motion. Describe the relevant starting arrangement, movement of the arm relative to "
-                "named objects, changes in orientation or contact, and ending arrangement. Integrate the "
-                "supporting visual observations into this description instead of replacing the action "
-                "narrative with an evidence-only statement. For a single image, be equally specific about "
-                "the visible arrangement without inventing motion. Do not add repetition or unsupported "
-                "details merely to increase length. "
-                "The labeled camera views show the same episode, not separate actions. Use the supplied "
-                "source times to relate sparse helper snapshots to the primary clip; their frame samples can differ. "
-                "Use the primary third-person view to describe the overall action, object location and world motion. "
-                "For scene-relative arm motion, such as approaching an object, withdrawing, or moving "
-                "toward a particular location, clear third-person observations alone are sufficient; "
-                "POV confirmation is not required. Do not omit such motion merely because sparse POV "
-                "snapshots do not show it. This applies to movement through the scene, not proof of "
-                "contact, grasping, holding or release; assess those interactions from their own visible evidence. "
-                "Use the helper POV mainly for local interaction evidence: visible contact, whether an object is "
-                "between the fingers, or whether it visibly separates from them. The wrist camera moves with the arm. "
-                "Inspect every provided POV snapshot for the object and its relationship to the fingers. "
-                "POV is direct visual evidence for local interaction, not optional background: use the view "
-                "that shows the fingers/object relationship most clearly. Clear POV evidence of contact, "
-                "an object held between the fingers, or separation does not also need to be visible in the "
-                "third-person view. If the third-person view is occluded, do not disregard the clearer POV. "
-                "When relevant, state the observed POV relationship in the caption and use it to support "
-                "the action or holding state. An object merely appearing somewhere in the POV does not "
-                "establish a grasp; distinguish an object between the fingers from one on the surface nearby. "
-                "An object moving upward, growing larger or shifting sideways in the POV can be caused entirely "
-                "by camera motion; this does not establish that the object was lifted or moved. "
-                "Do not infer object translation, lifting, transport or direction from POV image motion alone. "
-                "Describe these movements only when supported by the primary view; otherwise describe only the "
-                "local interaction that is actually visible. Do not invent an extra object just because it appears in both views. "
-                "Retain concrete action steps and relevant changes in object relationships; avoid generic scene filler. "
-                "For each action you describe, explain the visible evidence supporting it: what changes "
-                "between the observed frames, or what visible contact or object relationship supports the action. "
-                "Connect each action to its supporting observation in the caption, identifying the camera view "
-                "when relevant. For a single image, support descriptions with visible spatial or contact cues, "
-                "not invented before/after changes. If the evidence is ambiguous, qualify the action rather "
-                "than inventing supporting observations. "
-                "Describe what happens rather than guessing intentions from posture. Do not add task-success "
-                "or failure verdicts or sensor commentary. Mention uncertainty briefly only "
-                "when a relevant action cannot be seen. Do not infer that the whole interval is stationary "
-                "from one unchanged frame. Previous captions or episode history saying the gripper grabbed "
-                "an object are not visual evidence that it grabs that object again in the current subtask. "
-                "A new grasp claim needs supporting observations in the CURRENT interval. If the object "
-                "is already visibly held at the start, describe that state without inventing a new grasp. "
-                "Look equally for release and loss of hold, not only grasping. Describe when a previously "
-                "held object visibly separates from the fingers, is left on a surface or in a container, "
-                "or slips or drops while the gripper withdraws. Distinguish visible jaw opening, release "
-                "of an object, and accidental loss of hold; opening alone does not prove release, and an "
-                "empty gripper alone does not prove that an object was previously held. Support a release "
-                "or loss-of-hold claim with current-interval observations of the held/contact state changing "
-                "to separation in whichever supplied view shows it clearly. If separation is visible "
-                "but intention is unclear, describe it without assuming a deliberate release or an accident. "
-                "When little happens in the current interval, describe the visible pause, posture or small "
-                "adjustment; do not fill the caption by retelling actions from earlier subtasks. Prefer a "
-                "short accurate description over repeating history to make it longer."
-            )
-            if request.get("is_final_subtask"):
-                prompt += (
-                    "\nThis is the LAST selected subtask of this episode. It may simply show the arm "
-                    "withdrawing, returning toward a rest pose, settling or remaining idle after an earlier "
-                    "interaction. Consider these possibilities instead of assuming another grasp or placement. "
-                    "A return-to-rest is a possibility, not an observed fact: describe it only if the current "
-                    "images support it, and preserve any genuine object interaction visible here. If no new "
-                    "interaction is visible, describe only the current motion or resting arrangement; "
-                    "do not recap earlier manipulation as though it happened in this final interval."
-                )
+            # Original neutral caption instruction, before later robotics prompt revisions.
+            prompt = "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."
             previous = request.get("previous_subtask")
             if previous is not None:
                 prompt += (
@@ -196,14 +127,7 @@ class Captioner:
             content = [{"type": "text", "text": prompt}]
             for view in views:
                 if view.get("media_kind") == "image_sequence":
-                    content.append({"type": "text", "text":
-                        f'Helper POV snapshots: {view["camera"]}. These are sparse interaction checks at '
-                        'clip endpoints and in short bursts before, during and after possible gripper changes, '
-                        'not a continuous video. Compare successive burst snapshots for changes in contact, '
-                        'holding and separation, using their timestamps. '
-                        'Inspect the object/finger relationship in EACH image and use clear contact, holding '
-                        'or separation evidence even if hidden in the primary view. Selection alone does not '
-                        'establish a grasp; the visible relationship must support it.'})
+                    content.append({"type": "text", "text": f'POV snapshots: {view["camera"]}.'})
                     for frame, frame_id, stamp in zip(view["frames"], view["sample_frames"],
                                                       view["sample_timestamps"], strict=True):
                         relative = stamp - request.get("clip_start_timestamp", 0)
@@ -214,8 +138,6 @@ class Captioner:
                 content.extend([{"type": "text", "text": f'{view["role"].title()} view: {view["camera"]}.'},
                                 {"type": self.kind}])
                 flat_views.append((request, view))
-            if len(views) == 1:
-                content.append({"type": "text", "text": "Only the primary view is available; do not assume helper-view evidence."})
             conversations.append([{"role": "user", "content": content}])
         text = self.processor.apply_chat_template(conversations, tokenize=False, add_generation_prompt=True)
         if self.kind == "video":
