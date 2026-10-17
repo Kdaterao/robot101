@@ -148,8 +148,7 @@ class Captioner:
                 "than inventing supporting observations. "
                 "Describe what happens rather than guessing intentions from posture. Do not add task-success "
                 "or failure verdicts or sensor commentary. Mention uncertainty briefly only "
-                "when a relevant action cannot be seen. Do not infer that the whole interval is stationary "
-                "from one unchanged frame. Previous captions or episode history saying the gripper grabbed "
+                "when a relevant action cannot be seen. Previous captions or episode history saying the gripper grabbed "
                 "an object are not visual evidence that it grabs that object again in the current subtask. "
                 "A new grasp claim needs supporting observations in the CURRENT interval. If the object "
                 "is already visibly held at the start, describe that state without inventing a new grasp. "
@@ -161,18 +160,15 @@ class Captioner:
                 "or loss-of-hold claim with current-interval observations of the held/contact state changing "
                 "to separation in whichever supplied view shows it clearly. If separation is visible "
                 "but intention is unclear, describe it without assuming a deliberate release or an accident. "
-                "When little happens in the current interval, describe the visible pause, posture or small "
-                "adjustment; do not fill the caption by retelling actions from earlier subtasks. Prefer a "
-                "short accurate description over repeating history to make it longer."
+                "Do not repeat earlier subtask actions as though they occurred in the current interval."
             )
             if request.get("is_final_subtask"):
                 prompt += (
                     "\nThis is the LAST selected subtask of this episode. It may simply show the arm "
-                    "withdrawing, returning toward a rest pose, settling or remaining idle after an earlier "
+                    "withdrawing or returning toward a rest pose after an earlier "
                     "interaction. Consider these possibilities instead of assuming another grasp or placement. "
                     "A return-to-rest is a possibility, not an observed fact: describe it only if the current "
-                    "images support it, and preserve any genuine object interaction visible here. If no new "
-                    "interaction is visible, describe only the current motion or resting arrangement; "
+                    "images support it, and preserve any genuine object interaction visible here. "
                     "do not recap earlier manipulation as though it happened in this final interval."
                 )
             previous = request.get("previous_subtask")
