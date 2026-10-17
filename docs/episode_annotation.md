@@ -183,15 +183,6 @@ scene filler and success/failure audits. A token cap is a maximum, not a target;
 untruncated captions can finish well below it. This prompt change requires new
 caption and aggregation output directories.
 
-Approach labels require an observable decrease in gripper/end-effector distance
-to the same target across primary-view frames. Pointing, hovering, arm motion
-alone, jaw changes or POV enlargement do not establish approach. If separation
-stays unchanged, captions describe the actual movement/posture; if depth or
-occlusion makes it unclear, they use neutral spatial wording. Single midpoint
-images cannot establish an approach. Haiku applies the same evidence rule when
-standardizing captions. This is a prompt constraint, not a measured 3D-distance
-check; model compliance still needs visual inspection.
-
 ```bash
 python -m robot101.data.annotate --episodes 0 \
   --output-dir outputs/annotations_pov_helper \
@@ -219,7 +210,34 @@ and segment caches can be reused with the procedure below. For Haiku, use the
 new annotation repository with `--no-review` if only the initial annotation is
 wanted; no images or gripper measurements are sent to that text-only API.
 
-### Reusing JEPA results after captioning changes
+### More detailed descriptions
+
+Caption prompts request thorough descriptions of the visible action phases,
+temporal sequence, contact, object movement, appearance and spatial relationships.
+Haiku keeps `brief_action`/`brief_caption` short and preserves supported detail
+in `detailed_action`/`detailed_caption`. Prompts ask for useful specificity without
+inventing events or padding the result with repeated sentences.
+
+Token defaults are unchanged. If a previous command used a 512-token cap, replace
+it with `--max-caption-tokens 2048` for longer Qwen descriptions. For aggregation,
+`--max-tokens 4096` leaves room for detailed fields and diagnostics. These are
+ceilings, not minimum lengths, and longer generations may use more time and VRAM.
+Start with a small two-view batch when increasing the cap.
+
+```bash
+python -m robot101.data.annotate --episodes 0 \
+  --output-dir outputs/annotations_detailed --max-caption-tokens 2048 \
+  --video-batch-size 4 --image-batch-size 4
+
+python -m robot101.data.aggregate_annotations \
+  --input-dir outputs/annotations_detailed \
+  --output-dir outputs/haiku_detailed --no-review --max-tokens 4096
+```
+
+The detailed-description prompts are versioned. Use new caption and aggregation
+output directories so the earlier short captions are not reused from cache.
+
+### Reusing JEPA caches
 
 Changing models requires a new output directory. To reuse completed segmentation
 from the previous PerceptionLM run, copy only its feature and segment caches.

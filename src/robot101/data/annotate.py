@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-relative-distance-v6"
+CAPTION_PROMPT_VERSION = "multiview-detailed-description-v7"
 
 
 def build_parser():
