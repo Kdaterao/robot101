@@ -164,6 +164,27 @@ Image-only captions use visible spatial/contact cues without inventing temporal
 changes. Evidence stays in the caption text. Use a new output directory for this
 prompt version; older caption runs cannot resume with the changed prompt.
 
+### Previous-subtask context
+
+By default, annotation first generates independent captions, then refines only
+selected subtasks after the first using the immediately preceding selected
+subtask's **initial caption**. This snapshot keeps results independent of batch
+order and avoids feeding a chain of revised guesses into later captions. Only
+earlier, nonoverlapping subtasks in the same episode qualify. Earlier actions
+are context, not actions to repeat in the current description; current images
+take priority, and a preceding grasp is not assumed to persist.
+
+This adds up to one caption request per selected subtask after the first, plus
+model loading/decoding for the extra passes. Fixed batch sizes still apply.
+Use `--no-previous-subtask-context` to keep independent captioning only. This
+requires a new annotation output directory because the prompt/config changed.
+
+Initial captions remain in `node_captions/`; separate resumable results live in
+`context_captions/`. Episode exports, the viewer and Hub uploads use the refined
+captions, with the exact `previous_subtask` context saved for inspection. Failed
+or truncated preceding captions remain explicitly labeled. This does not change
+segmentation or add gripper-state claims to the prompts.
+
 ### Synchronized POV helper view
 
 Captioning uses the primary camera (`--camera top` by default) together with a

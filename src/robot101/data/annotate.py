@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-event-helper-action-evidence-v11"
+CAPTION_PROMPT_VERSION = "multiview-event-helper-previous-context-v12"
 
 
 def build_parser():
@@ -39,6 +39,8 @@ def build_parser():
     p.add_argument("--helper-camera", default="wrist", help="Synchronized auxiliary camera for captioning")
     p.add_argument("--helper-view", action=argparse.BooleanOptionalAction, default=True,
                    help="Include the helper camera in captions; JEPA still uses only --camera")
+    p.add_argument("--previous-subtask-context", action=argparse.BooleanOptionalAction, default=True,
+                   help="Refine selected captions with the preceding subtask initial caption (extra model calls)")
     p.add_argument("--output-dir", type=Path, default=Path("outputs/annotations"))
     p.add_argument("--stage", choices=["all", "segment", "caption"], default="all")
     p.add_argument("--resume", action="store_true")
@@ -202,7 +204,8 @@ def episode_timer(record, phase):
     try:
         yield
     finally:
-        record.setdefault("processing_timings", {})[f"{phase}_seconds"] = perf_counter() - started
+        timings = record.setdefault("processing_timings", {})
+        timings[f"{phase}_seconds"] = timings.get(f"{phase}_seconds", 0) + perf_counter() - started
 
 
 def caption_failure_warning(record, kind, node_ids, error):
@@ -224,7 +227,7 @@ def helper_sample_frames(record, node, kind):
         if start <= int(event["frame"]) < end)})
 
 
-def caption_records(args, run, records, source, kind, worker_factory):
+def caption_records(args, run, records, source, kind, worker_factory, previous_contexts=None):
     from PIL import Image
     from robot101.perception.annotation_models import release
     worker = None
@@ -236,14 +239,20 @@ def caption_records(args, run, records, source, kind, worker_factory):
                 for node in record["nodes"]:
                     if node["caption_kind"] != kind:
                         continue
+                    previous_context = None
+                    if previous_contexts is not None:
+                        previous_context = previous_contexts.get((record["episode_index"], node["id"]))
+                        if previous_context is None:
+                            continue
                     indices = uniform_frames(node, args.video_frames) if kind == "video" else [midpoint(node)]
                     prompt_version = CAPTION_PROMPT_VERSION
                     key = fingerprint(dict(segment=record["fingerprint"], node=node, model=run["resolved"][kind],
                                            model_id=args.video_model if kind == "video" else args.image_model,
                                            sample_frames=indices, tokens=args.max_caption_tokens, prompt=prompt_version,
+                                           previous_subtask=previous_context,
                                            helper_camera=args.helper_camera if args.helper_view else None,
                                            dtype=args.dtype, adapter="direct-frames-metadata-v2"))
-                    path = args.output_dir / "node_captions" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
+                    path = args.output_dir / ("context_captions" if previous_contexts is not None else "node_captions") / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
                     cached = cached_json(path, key, args.resume)
                     if cached and cached.get("status") == "ok":
                         node["caption"] = cached
@@ -328,7 +337,8 @@ def caption_records(args, run, records, source, kind, worker_factory):
                         requests.append(dict(frames=views[0]["frames"], views=views, fps=record["fps"],
                                              frame_indices=[i - node["start_frame"] for i in ids],
                                              total_num_frames=node["end_frame"] - node["start_frame"],
-                                             helper_status=helper_error or helper_status))
+                                             helper_status=helper_error or helper_status,
+                                             previous_subtask=(previous_contexts or {}).get((record["episode_index"], node["id"]))))
                         valid_jobs.append((node, ids, path, key))
                     if not valid_jobs:
                         continue
@@ -358,6 +368,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                                                image_subdir="" if view["role"] == "primary" else view["camera"])
                                            for view in request["views"]]
                         result["helper_status"] = request["helper_status"]
+                        result["previous_subtask"] = request["previous_subtask"]
                         result["prompt_version"] = prompt_version
                         result.setdefault("status", "ok")
                         if result["status"] != "ok" and batch_error is None:
@@ -369,6 +380,25 @@ def caption_records(args, run, records, source, kind, worker_factory):
                           f'— batch succeeded={ok}, failed={len(results) - ok}, {seconds:.1f}s', flush=True)
     finally:
         release(worker)
+
+
+def preceding_subtask_contexts(records):
+    """Freeze initial captions so context never depends on batch/refinement order."""
+    contexts = {}
+    for record in records:
+        selected = set(record["selected_node_ids"])
+        cut = sorted((n for n in record["nodes"] if n["id"] in selected), key=lambda n: n["start_frame"])
+        for previous, current in zip(cut, cut[1:]):
+            if previous["end_frame"] > current["start_frame"]:
+                continue
+            caption = previous.get("caption", {})
+            contexts[(record["episode_index"], current["id"])] = dict(
+                node_id=previous["id"], start_frame=previous["start_frame"], end_frame=previous["end_frame"],
+                status=caption.get("status", "missing"), truncated=caption.get("truncated", False),
+                text=caption.get("text") if caption.get("status") == "ok" else None,
+                error=caption.get("error"), caption_kind=previous["caption_kind"],
+                caption_fingerprint=caption.get("fingerprint"), source="initial_caption")
+    return contexts
 
 
 def main(argv=None):
@@ -459,6 +489,12 @@ def _run(args, usage):
         if args.stage != "segment":
             for kind in ("video", "image"):
                 caption_records(args, run, records, source, kind, captioner)
+            if args.previous_subtask_context:
+                contexts = preceding_subtask_contexts(records)
+                if contexts:
+                    print(f"[context] refining {len(contexts)} selected subtasks with preceding initial captions", flush=True)
+                    for kind in ("video", "image"):
+                        caption_records(args, run, records, source, kind, captioner, previous_contexts=contexts)
     finally:
         for record in records:
             record["review_required"] |= any(n.get("caption", {}).get("status") != "ok" or

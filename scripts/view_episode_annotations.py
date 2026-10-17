@@ -40,6 +40,7 @@ button{cursor:pointer}h1{font-size:24px}h2{font-size:19px}.muted{color:#aebbd0}
 <div id="layout"><div class="panel"><h2>Hierarchy nodes</h2><div id="nodes"></div></div>
 <div class="panel"><h2 id="title">Select a node</h2><p id="bounds" class="muted"></p><p id="state" class="warning"></p><p id="action"></p><div id="caption"></div>
 <details id="originalbox"><summary>Original model caption</summary><p id="original"></p></details>
+<details id="previousbox"><summary>Previous-subtask context supplied to the model</summary><pre id="previous" style="white-space:pre-wrap"></pre></details>
 <details id="reviewbox"><summary>Review diagnostics and critique</summary><pre id="review" style="white-space:pre-wrap"></pre></details>
 <h2>Sampled frames</h2><div id="frames"></div></div></div>
 <script>
@@ -60,7 +61,7 @@ function render(){
  $('nodes').replaceChildren();
  for(const n of shown){const b=document.createElement('button'),c=caption(n);let depth=0,p=n.parent_id||n.parent,seen=new Set([n.id]);while(p&&byId.has(p)&&!seen.has(p)){seen.add(p);depth++;const ancestor=byId.get(p);p=ancestor.parent_id||ancestor.parent}
  b.style.paddingLeft=`${8+Math.min(depth,12)*10}px`;b.className=n.id===nodeId?'active':'';b.textContent=`${n.id} · ${(n.start_frame/current.fps).toFixed(2)}–${(n.end_frame/current.fps).toFixed(2)}s · ${n.caption_kind||'node'} · ${c.status||'pending'}`;b.onclick=()=>selectNode(n.id);$('nodes').append(b)}
- const n=byId.get(nodeId);$('frames').replaceChildren();if(!n){$('title').textContent='No retained nodes';$('bounds').textContent='';$('state').textContent='Episode needs review';$('caption').textContent=JSON.stringify(current.review_reasons||[]);return}
+ const n=byId.get(nodeId);$('previousbox').hidden=!n?.caption?.previous_subtask;$('previous').textContent=n?.caption?.previous_subtask?JSON.stringify(n.caption.previous_subtask,null,2):'';$('frames').replaceChildren();if(!n){$('title').textContent='No retained nodes';$('bounds').textContent='';$('state').textContent='Episode needs review';$('caption').textContent=JSON.stringify(current.review_reasons||[]);return}
  const c=caption(n);$('title').textContent=`${n.id}${selected.has(n.id)?' · selected subtask':' · hierarchy context'}`;
  $('bounds').textContent=`Frames [${n.start_frame}, ${n.end_frame}) · ${(n.start_frame/current.fps).toFixed(2)}–${(n.end_frame/current.fps).toFixed(2)} seconds · parent ${n.parent_id||n.parent||'none'} · children ${(n.children||[]).join(', ')||'none'}`;
  $('state').textContent=`Caption: ${c.status||'pending'}${c.truncated?' · truncated, review required':''}${c.error?' · '+c.error:''}`;
@@ -100,6 +101,9 @@ def load_catalog(root, limit, selected):
                 if not re.fullmatch(r"n\d+", node_id):
                     continue
                 path = root / "node_captions" / f"ep{episode:06d}" / f"{node_id}.json"
+                contextual = root / "context_captions" / f"ep{episode:06d}" / f"{node_id}.json"
+                if contextual.exists():
+                    path = contextual
                 if path.exists():
                     try:
                         node["caption"] = json.loads(path.read_text())
