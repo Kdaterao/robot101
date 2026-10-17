@@ -100,7 +100,7 @@ class Captioner:
             tower.set_input_size(img_size=(320, 320))
 
     def caption(self, requests, max_tokens=1024):
-        conversations, flat_views = [], []
+        conversations, flat_views, helper_images = [], [], []
         for request in requests:
             prompt = (
                 "Describe the visible actions and object movements in detail, in temporal order. "
@@ -108,7 +108,8 @@ class Captioner:
                 "Describe the visible objects and their spatial relationships in detail at this instant. "
             )
             prompt += (
-                "The labeled camera views show the same scene at matching source times, not separate actions. "
+                "The labeled camera views show the same episode, not separate actions. Use the supplied "
+                "source times to relate sparse helper snapshots to the primary clip; their frame samples can differ. "
                 "Use the primary third-person view to describe the overall action, object location and world motion. "
                 "Use the helper POV mainly for local interaction evidence: visible contact, whether an object is "
                 "between the fingers, or whether it visibly separates from them. The wrist camera moves with the arm. "
@@ -132,6 +133,17 @@ class Captioner:
             views = request.get("views") or [dict(camera="primary", role="primary", frames=request["frames"])]
             content = [{"type": "text", "text": prompt}]
             for view in views:
+                if view.get("media_kind") == "image_sequence":
+                    content.append({"type": "text", "text":
+                        f'Helper POV snapshots: {view["camera"]}. These are sparse interaction checks at '
+                        'clip endpoints and possible gripper-change times, not a continuous video. '
+                        'Selection does not establish contact or a successful grasp; use visible evidence.'})
+                    for frame, frame_id, stamp in zip(view["frames"], view["sample_frames"],
+                                                      view["sample_timestamps"], strict=True):
+                        content.extend([{"type": "text", "text": f'POV source frame {frame_id}, time {stamp:.3f} s.'},
+                                        {"type": "image"}])
+                        helper_images.append(frame)
+                    continue
                 content.extend([{"type": "text", "text": f'{view["role"].title()} view: {view["camera"]}.'},
                                 {"type": self.kind}])
                 flat_views.append((request, view))
@@ -151,8 +163,10 @@ class Captioner:
                                     video_metadata=[dict(fps=r["fps"], frames_indices=r["frame_indices"],
                                                          total_num_frames=r["total_num_frames"])
                                                     for r, _ in flat_views])
+            image_kwargs = dict(images=helper_images) if helper_images else {}
             inputs = self.processor(text=text, videos=[view["frames"] for _, view in flat_views],
                                     do_sample_frames=False, **video_kwargs,
+                                    **image_kwargs,
                                     padding=True, return_tensors="pt")
         else:
             inputs = self.processor(text=text, images=[view["frames"][0] for _, view in flat_views],

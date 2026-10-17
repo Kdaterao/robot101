@@ -167,17 +167,24 @@ prompt version; older caption runs cannot resume with the changed prompt.
 ### Synchronized POV helper view
 
 Captioning uses the primary camera (`--camera top` by default) together with a
-wrist/POV helper (`--helper-camera wrist`). Each video caption receives two
-labeled clips with the exact same source frame IDs, 32 sparse frames per view
-by default; image captions receive both camera images at the same midpoint.
+wrist/POV helper (`--helper-camera wrist`). Each video caption receives a primary-camera
+clip (32 sparse frames by default), plus timestamped POV still images at that
+node's first and last frames and each detected likely gripper opening/closing
+event inside its half-open bounds. Duplicate IDs are removed. Event selection
+uses the existing gripper-change detector (minimum change fraction 0.25), not
+new segmentation. These irregularly spaced POV observations are images rather
+than a second video; only the primary clip supplies continuous temporal context.
+Image captions still receive both camera images at the same midpoint.
 Models receive these as separate visual inputs, not a stitched image. JEPA still
 segments only the primary camera and its boundaries are unchanged.
 
 Prompts ask for observed actions, object movement and spatial relationships,
 without guessing intent or adding grasp-success/failure verdicts. The wrist view
 helps clarify contact and occlusion; it depicts the same scene, not additional
-objects or actions. Gripper sensor input has been removed from Qwen and Haiku
-prompts. Raw gripper metadata may remain in episode sidecars for diagnostics.
+objects or actions. Gripper values and open/closed labels are not supplied to Qwen or Haiku.
+Events only select POV snapshots; they do not establish interaction or grasp
+success. Without detected events, video nodes still get both endpoint snapshots.
+Raw gripper metadata remains in episode sidecars for diagnostics.
 The old `--gripper-hints` and `--gripper-open-direction` options are removed.
 
 The POV helper is restricted to local interaction cues (visible contact,
@@ -200,13 +207,14 @@ python -m robot101.data.annotate --episodes 0 \
 Two views increase visual tokens and VRAM per node. Start with smaller batches
 than the old single-view batch of 36 and measure usage before increasing them.
 Use `--no-helper-view` for a primary-only comparison. If both camera options name
-the same camera, it is sent only once. If any requested helper frame for a node
-is missing, or helper decoding fails, only its primary view is used; the result's
-`helper_status` explains why. No black placeholder or nearby-frame substitution
+the same camera, it is sent only once. Missing helper snapshots are omitted, with `partial_helper_frames` recorded
+when some remain. If none are available or helper decoding fails, only the primary
+view is used; the result's `helper_status` explains why. No black placeholder or nearby-frame substitution
 is sent as a helper observation.
 
-Each caption records its actual camera views, sample IDs, prompt version and
-helper availability. Primary inspection images retain the existing paths; helper
+Each caption records per-view sample IDs and timestamps, media type, prompt
+version and helper availability. The viewer and HTML reports respect these
+per-view samples. Use a new output directory for this changed prompt/input mode. Primary inspection images retain the existing paths; helper
 images are saved under `images/epXXXXXX/wrist/`. The browser viewer and HTML
 reports display both views with camera labels. Original videos remain clean.
 

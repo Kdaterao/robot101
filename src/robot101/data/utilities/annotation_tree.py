@@ -256,7 +256,7 @@ def write_report(root, record):
             images += f'<p>{html.escape(str(view.get("camera", "primary")))}</p>'
             images += "".join(f'<img width="160" src="../images/ep{record["episode_index"]:06d}/'
                               f'{html.escape(subdir + "/" if subdir else "", quote=True)}f{i:06d}.jpg">'
-                              for i in dict.fromkeys(sample))
+                              for i in dict.fromkeys(view.get("sample_frames", sample)))
         rows.append(f'<tr><td>{node["id"]}</td><td>{node["start_frame"]}–{node["end_frame"]}</td>'
                     f'<td>{"selected" if node["id"] in record["selected_node_ids"] else "context"}</td>'
                     f'<td>{html.escape(caption.get("text", caption.get("error", "pending")))}</td><td>{images}</td></tr>')

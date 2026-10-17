@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-contact-helper-action-evidence-v10"
+CAPTION_PROMPT_VERSION = "multiview-event-helper-action-evidence-v11"
 
 
 def build_parser():
@@ -214,6 +214,16 @@ def caption_failure_warning(record, kind, node_ids, error):
               "This batch was saved as failed; it was not retried automatically.", file=sys.stderr, flush=True)
 
 
+def helper_sample_frames(record, node, kind):
+    """POV snapshots at node endpoints and likely opening/closing events."""
+    if kind != "video":
+        return [midpoint(node)]
+    start, end = node["start_frame"], node["end_frame"]
+    return sorted({start, end - 1, *(
+        int(event["frame"]) for event in record.get("gripper_events", [])
+        if start <= int(event["frame"]) < end)})
+
+
 def caption_records(args, run, records, source, kind, worker_factory):
     from PIL import Image
     from robot101.perception.annotation_models import release
@@ -267,7 +277,9 @@ def caption_records(args, run, records, source, kind, worker_factory):
                 if len(cameras) > 1:
                     helper_start = perf_counter()
                     try:
-                        helper_indices = [i for i in indices if data["masks"][args.helper_camera][i]]
+                        helper_indices = sorted({i for node, _, _, _ in jobs
+                                                 for i in helper_sample_frames(record, node, kind)
+                                                 if data["masks"][args.helper_camera][i]})
                         if helper_indices:
                             decode_episode_cameras(ds, data, [args.helper_camera], indices=helper_indices,
                                                    batch_size=args.decode_batch_size, backend=args.video_backend)
@@ -287,26 +299,31 @@ def caption_records(args, run, records, source, kind, worker_factory):
                             atomic_json(path, result)
                             node["caption"] = result
                             continue
-                        view_names = [args.camera]
+                        view_samples = [(args.camera, ids)]
                         helper_status = "disabled" if not args.helper_view else "same_as_primary"
                         if len(cameras) > 1:
-                            helper_status = "missing_synchronized_helper_frames"
-                            if (all(data["masks"][args.helper_camera][ids]) and
-                                    all(data.get("frames", {}).get(args.helper_camera, [None] * data["n"])[i] is not None for i in ids)):
-                                view_names.append(args.helper_camera)
-                                helper_status = "used"
+                            wanted = helper_sample_frames(record, node, kind)
+                            available = [i for i in wanted if data["masks"][args.helper_camera][i]
+                                         and data.get("frames", {}).get(args.helper_camera, [None] * data["n"])[i] is not None]
+                            helper_status = "missing_helper_frames"
+                            if available:
+                                view_samples.append((args.helper_camera, available))
+                                helper_status = "used" if available == wanted else "partial_helper_frames"
                         image_root = args.output_dir / "images" / f'ep{record["episode_index"]:06d}'
                         image_root.mkdir(parents=True, exist_ok=True)
                         views = []
-                        for camera in view_names:
-                            frames = [data["frames"][camera][i] for i in ids]
+                        for camera, view_ids in view_samples:
+                            frames = [data["frames"][camera][i] for i in view_ids]
                             directory = image_root if camera == args.camera else image_root / camera
                             directory.mkdir(parents=True, exist_ok=True)
-                            for i, frame in zip(ids, frames, strict=True):
+                            for i, frame in zip(view_ids, frames, strict=True):
                                 Image.fromarray(frame).save(directory / f"f{i:06d}.jpg", quality=85)
                             if kind == "video":
                                 frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
                             views.append(dict(camera=camera, frames=np.stack(frames),
+                                              sample_frames=view_ids,
+                                              sample_timestamps=[data["timestamps"][i] for i in view_ids],
+                                              media_kind="image_sequence" if kind == "video" and camera != args.camera else kind,
                                               role="primary" if camera == args.camera else "helper"))
                         requests.append(dict(frames=views[0]["frames"], views=views, fps=record["fps"],
                                              frame_indices=[i - node["start_frame"] for i in ids],
@@ -336,7 +353,8 @@ def caption_records(args, run, records, source, kind, worker_factory):
                         result.update(fingerprint=key, kind=kind, sample_frames=ids,
                                       sample_timestamps=[data["timestamps"][i] for i in ids],
                                       model_revision=run["resolved"][kind], seconds=seconds / len(valid_jobs))
-                        result["views"] = [dict(camera=view["camera"], role=view["role"], sample_frames=ids,
+                        result["views"] = [dict(camera=view["camera"], role=view["role"], sample_frames=view["sample_frames"],
+                                               sample_timestamps=view["sample_timestamps"], media_kind=view["media_kind"],
                                                image_subdir="" if view["role"] == "primary" else view["camera"])
                                            for view in request["views"]]
                         result["helper_status"] = request["helper_status"]
