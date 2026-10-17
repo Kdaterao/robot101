@@ -211,14 +211,24 @@ not assumed when the images cannot distinguish them.
 Captioning uses the primary camera (`--camera top` by default) together with a
 wrist/POV helper (`--helper-camera wrist`). Each video caption receives a primary-camera
 clip (32 sparse frames by default), plus timestamped POV still images at that
-node's first and last frames and each detected likely gripper opening/closing
-event inside its half-open bounds. Duplicate IDs are removed. Event selection
+node's first and last frames, plus bursts around each detected likely gripper
+opening/closing event inside its half-open bounds. By default each burst samples
+five frames across a centered 0.5-second window (about 0.25 seconds before and
+after the event), including the event frame. Bursts are clipped to the current
+node; duplicate IDs are removed, so short clips or overlapping bursts may yield
+fewer unique images. Event selection
 uses the existing gripper-change detector (minimum change fraction 0.25), not
 new segmentation. These irregularly spaced POV observations are images rather
 than a second video; only the primary clip supplies continuous temporal context.
 Image captions still receive both camera images at the same midpoint.
 Models receive these as separate visual inputs, not a stitched image. JEPA still
 segments only the primary camera and its boundaries are unchanged.
+
+Set `--helper-event-frames 3` or `--helper-event-frames 7` to adjust the sampling
+concentration, and `--helper-event-window-seconds 1` to span a full second around
+each event. `--helper-event-frames 1` restores event-only sampling. More snapshots
+increase visual-token and VRAM usage. Use a new output directory when changing
+these settings; both settings are included in run and caption cache fingerprints.
 
 Prompts ask for observed actions, object movement and spatial relationships,
 without guessing intent or adding grasp-success/failure verdicts. The wrist view

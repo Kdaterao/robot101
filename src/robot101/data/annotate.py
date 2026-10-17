@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-pov-interaction-evidence-v16"
+CAPTION_PROMPT_VERSION = "multiview-pov-event-bursts-v17"
 
 
 def build_parser():
@@ -37,6 +37,10 @@ def build_parser():
     p.add_argument("--episodes", default="0", help="Inclusive ranges, e.g. 0-25:5")
     p.add_argument("--camera", default="top")
     p.add_argument("--helper-camera", default="wrist", help="Synchronized auxiliary camera for captioning")
+    p.add_argument("--helper-event-frames", type=int, default=5,
+                   help="POV frames sampled around each gripper event, including the event itself")
+    p.add_argument("--helper-event-window-seconds", type=float, default=0.5,
+                   help="Total centered time window for each POV event burst")
     p.add_argument("--helper-view", action=argparse.BooleanOptionalAction, default=True,
                    help="Include the helper camera in captions; JEPA still uses only --camera")
     p.add_argument("--previous-subtask-context", action=argparse.BooleanOptionalAction, default=True,
@@ -217,14 +221,23 @@ def caption_failure_warning(record, kind, node_ids, error):
               "This batch was saved as failed; it was not retried automatically.", file=sys.stderr, flush=True)
 
 
-def helper_sample_frames(record, node, kind):
-    """POV snapshots at node endpoints and likely opening/closing events."""
+def helper_sample_frames(record, node, kind, *, event_frames=5, event_window_seconds=0.5):
+    """POV endpoints and event-centered bursts, clipped to the current node."""
     if kind != "video":
         return [midpoint(node)]
     start, end = node["start_frame"], node["end_frame"]
-    return sorted({start, end - 1, *(
-        int(event["frame"]) for event in record.get("gripper_events", [])
-        if start <= int(event["frame"]) < end)})
+    selected = {start, end - 1}
+    radius = event_window_seconds * record["fps"] / 2
+    # Explicitly retain the event frame for even counts as well as odd counts.
+    before = event_frames // 2
+    after = event_frames - before - 1
+    offsets = np.concatenate((np.linspace(-radius, 0, before + 1)[:-1],
+                              [0], np.linspace(0, radius, after + 1)[1:]))
+    for event in record.get("gripper_events", []):
+        frame = int(event["frame"])
+        if start <= frame < end:
+            selected.update(int(np.clip(round(frame + delta), start, end - 1)) for delta in offsets)
+    return sorted(selected)
 
 
 def caption_records(args, run, records, source, kind, worker_factory, previous_contexts=None):
@@ -255,6 +268,8 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                                            sample_frames=indices, tokens=args.max_caption_tokens, prompt=prompt_version,
                                            previous_subtask=previous_context,
                                            is_final_subtask=node["id"] == final_subtask_id,
+                                           helper_event_frames=args.helper_event_frames,
+                                           helper_event_window_seconds=args.helper_event_window_seconds,
                                            helper_camera=args.helper_camera if args.helper_view else None,
                                            dtype=args.dtype, adapter="direct-frames-metadata-v2"))
                     path = args.output_dir / ("context_captions" if previous_contexts is not None else "node_captions") / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
@@ -292,7 +307,9 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                     helper_start = perf_counter()
                     try:
                         helper_indices = sorted({i for node, _, _, _ in jobs
-                                                 for i in helper_sample_frames(record, node, kind)
+                                                 for i in helper_sample_frames(record, node, kind,
+                                                     event_frames=args.helper_event_frames,
+                                                     event_window_seconds=args.helper_event_window_seconds)
                                                  if data["masks"][args.helper_camera][i]})
                         if helper_indices:
                             decode_episode_cameras(ds, data, [args.helper_camera], indices=helper_indices,
@@ -316,7 +333,9 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                         view_samples = [(args.camera, ids)]
                         helper_status = "disabled" if not args.helper_view else "same_as_primary"
                         if len(cameras) > 1:
-                            wanted = helper_sample_frames(record, node, kind)
+                            wanted = helper_sample_frames(record, node, kind,
+                                event_frames=args.helper_event_frames,
+                                event_window_seconds=args.helper_event_window_seconds)
                             available = [i for i in wanted if data["masks"][args.helper_camera][i]
                                          and data.get("frames", {}).get(args.helper_camera, [None] * data["n"])[i] is not None]
                             helper_status = "missing_helper_frames"
@@ -424,11 +443,13 @@ def _run(args, usage):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.helper_camera):
         raise SystemExit("--helper-camera must be a camera name without path separators")
     for name in ("download_workers", "decode_batch_size", "sample_step", "jepa_batch_size", "max_segments",
-                 "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens"):
+                 "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens", "helper_event_frames"):
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
     if args.min_duration < 0 or not np.isfinite(args.min_duration) or not -1 <= args.silhouette_threshold <= 1:
         raise SystemExit("Invalid duration or silhouette threshold")
+    if not np.isfinite(args.helper_event_window_seconds) or args.helper_event_window_seconds <= 0:
+        raise SystemExit("--helper-event-window-seconds must be finite and positive")
     windows(1, args.window_frames, args.window_stride)
     os.environ["SO101_HF_DOWNLOAD_WORKERS"] = str(args.download_workers)
     args.output_dir.mkdir(parents=True, exist_ok=True)

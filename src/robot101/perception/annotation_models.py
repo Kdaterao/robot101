@@ -193,7 +193,9 @@ class Captioner:
                 if view.get("media_kind") == "image_sequence":
                     content.append({"type": "text", "text":
                         f'Helper POV snapshots: {view["camera"]}. These are sparse interaction checks at '
-                        'clip endpoints and possible gripper-change times, not a continuous video. '
+                        'clip endpoints and in short bursts before, during and after possible gripper changes, '
+                        'not a continuous video. Compare successive burst snapshots for changes in contact, '
+                        'holding and separation, using their timestamps. '
                         'Inspect the object/finger relationship in EACH image and use clear contact, holding '
                         'or separation evidence even if hidden in the primary view. Selection alone does not '
                         'establish a grasp; the visible relationship must support it.'})
