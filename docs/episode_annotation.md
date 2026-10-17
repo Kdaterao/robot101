@@ -194,9 +194,9 @@ segmentation or add gripper-state claims to the prompts.
 
 Prior captions cannot establish a new grasp in the current interval. An object
 already held at the start is a visible state, not proof of a new grasp. When
-describing the current interval, captions must not recycle earlier actions.
+little happens, captions describe that interval without recycling earlier actions.
 The final selected subtask is explicitly marked (`is_final_subtask` in caption
-sidecars): the prompt considers withdrawal or return to rest as possibilities,
+sidecars): the prompt considers withdrawal, return to rest or idle as possibilities,
 without forcing those labels over genuine visible interactions. Use a new output
 directory for this prompt version.
 

@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-no-idle-guidance-v18"
+CAPTION_PROMPT_VERSION = "multiview-pov-event-bursts-v17"
 
 
 def build_parser():
