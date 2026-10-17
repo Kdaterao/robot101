@@ -168,6 +168,10 @@ is supplied as visual helper context by default, an explicit robotics adaptation
 
 The default caption prompt is restored to the original neutral instruction:
 **“Describe this video in detail.”** or **“Describe this image in detail.”**
+Video prompts require visible frame-to-frame support for robot movement and
+prohibit invented back-and-forth actions when the arm remains in place. Small
+finger/object changes are distinct from arm movement, and camera jitter is not
+robot motion. A single unchanged frame does not establish whole-clip stillness.
 It also asks the model to focus on observable interactions between the robotic
 arm and scene objects, rather than only inventorying objects or describing posture.
 This includes visible tool-mediated interactions: distinguish a held tool from
@@ -448,6 +452,31 @@ Missing or truncated captions require review when they materially affect the ann
 task text is intended context, not proof of success. Desired completion conditions
 are not observed success labels.
 
+### Optional original task prompt
+
+Add `--use-task-prompt` to send the original episode instruction (the caption
+artifact's `task` field) to Claude as `task_context`. It can clarify the intended
+goal and desired completion condition, but cannot establish actions or success
+or override conflicting caption evidence. An empty task stays unavailable.
+
+Without the flag, raw task text is omitted from Claude's request evidence.
+Earlier versions always included it; this option now makes the comparison
+explicit. The original task remains in exported episode metadata in either mode.
+This does not regenerate video/image captions. The option is saved in run config,
+node cache fingerprints and episode aggregation metadata. Use separate output
+directories for comparisons; resume rejects switching modes in an existing run.
+
+```bash
+python -m robot101.data.aggregate_annotations \
+  --src-repo-id kdaterao/so101_annotations_plm3b_verified_spread5 \
+  --episodes 0-400:100 \
+  --output-dir outputs/aggregated_plm3b_spread5_with_task \
+  --node-scope selected --use-task-prompt \
+  --rounds 3 --concurrency 2 --max-tokens 4096
+```
+
+For the comparison, omit `--use-task-prompt` and choose a second output directory.
+
 Claude's aggregation prompt restricts action evidence to the current interval,
 distinguishes omissions from contradictions at overlapping times, and compares
 specific observations with broad no-motion claims without automatically favoring
@@ -539,6 +568,7 @@ python -m pip install --upgrade "anthropic>=0.125,<1"
 | `--rounds` | `3` | Initial annotation plus critique/revision rounds |
 | `--no-review` | off | Override rounds to one; skip critique/revision passes |
 | `--node-scope` | `selected` | Only selected subtasks; `all` restores aggregation of every retained node |
+| `--use-task-prompt` | off | Include the original dataset instruction as intended-goal context |
 | `--concurrency` | `2` | Concurrent node jobs; rounds within each node stay sequential |
 | `--max-tokens` | `2048` | API output cap per request; independent of GPU caption token limits |
 | `--resume` | off | Reuse compatible local checkpoints |

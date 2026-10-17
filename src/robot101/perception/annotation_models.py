@@ -158,6 +158,14 @@ class Captioner:
         for request in requests:
             # Original neutral caption instruction, before later robotics prompt revisions.
             prompt = "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."
+            if self.kind == "video":
+                prompt += (
+                    " Describe robot movement only when visible changes across frames support it. "
+                    "If the arm remains in the same position, describe it as remaining in place; do not "
+                    "invent back-and-forth motion or an action sequence. Small finger or object changes "
+                    "can still occur without arm movement. Distinguish robot movement from camera motion "
+                    "or image jitter, and do not infer whole-clip stillness from a single unchanged frame."
+                )
             prompt += (
                 " Focus on how the robotic arm interacts with objects in the scene: its movement "
                 "relative to them, visible contact, grasping, holding, moving objects and releasing them, "

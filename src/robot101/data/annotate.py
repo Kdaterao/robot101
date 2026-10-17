@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "description-episode-no-pov-v25"
+CAPTION_PROMPT_VERSION = "description-observed-motion-only-v26"
 
 
 def build_parser():
