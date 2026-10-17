@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "original-neutral-description-qwen3-v20"
+CAPTION_PROMPT_VERSION = "neutral-description-pov-explanation-v21"
 
 
 def build_parser():

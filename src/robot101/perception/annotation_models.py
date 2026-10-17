@@ -124,6 +124,17 @@ class Captioner:
                     + json.dumps(previous) + "\n"
                 )
             views = request.get("views") or [dict(camera="primary", role="primary", frames=request["frames"])]
+            if any(view.get("role") == "helper" for view in views):
+                prompt += (
+                    "\nThe helper POV is a wrist-mounted camera looking toward the robot's gripper. "
+                    "It shows the same scene as the primary third-person camera from a close viewpoint, "
+                    "not a separate episode. Use it to see local interaction: the fingers, nearby objects, "
+                    "contact, an object held between the fingers, or separation during release. Its camera "
+                    "moves with the arm, so image motion alone does not establish object movement. "
+                    "Use the third-person view for overall movement through the scene. Timestamped POV "
+                    "snapshots are sparse observations, not a continuous video; their times locate them "
+                    "within the current clip. An object merely visible in the POV is not necessarily held."
+                )
             content = [{"type": "text", "text": prompt}]
             for view in views:
                 if view.get("media_kind") == "image_sequence":

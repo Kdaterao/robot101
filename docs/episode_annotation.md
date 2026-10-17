@@ -167,8 +167,11 @@ is supplied as visual helper context by default, an explicit robotics adaptation
 
 The default caption prompt is restored to the original neutral instruction:
 **“Describe this video in detail.”** or **“Describe this image in detail.”**
-Camera labels and snapshot timestamps identify the inputs. Later action-evidence,
-POV interpretation, grasp/release, idle and final-subtask instructions have been
+Camera labels and snapshot timestamps identify the inputs. When a helper view is
+present, a short explanation identifies it as a wrist-mounted view of the same
+scene, useful for local contact/holding/release observations. It explains that
+the camera moves with the arm and that object visibility alone does not prove
+holding. Later action-evidence, idle and final-subtask instructions have been
 removed. Both caption passes use Qwen3-VL-8B-Instruct. Current frame sampling,
 batching and hardware/timing reporting are retained. Use a new output directory
 for this prompt version; old run configurations cannot resume under it.
@@ -221,8 +224,8 @@ these settings; both settings are included in run and caption cache fingerprints
 
 The POV frames are still supplied as additional visual inputs. Gripper events
 select images, but gripper values and open/closed labels are not sent to Qwen.
-The restored neutral prompt does not prescribe camera roles or interaction
-interpretations. Without detected events, video nodes still get endpoint
+The prompt briefly explains camera roles without imposing an action sequence.
+Without detected events, video nodes still get endpoint
 snapshots. A token cap is a maximum, not a target; captions can finish below it.
 
 ```bash
