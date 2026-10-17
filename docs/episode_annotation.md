@@ -167,8 +167,14 @@ is supplied as visual helper context by default, an explicit robotics adaptation
 
 The default caption prompt is restored to the original neutral instruction:
 **“Describe this video in detail.”** or **“Describe this image in detail.”**
+For video only, it also asks the model to compare the beginning, middle and end,
+describe changes in arm position relative to objects and in contact/holding, and
+avoid judging the whole clip from one frame.
 It also asks the model to focus on observable interactions between the robotic
 arm and scene objects, rather than only inventorying objects or describing posture.
+This includes visible tool-mediated interactions: distinguish a held tool from
+its target and describe their contact or effect, without requiring finger-to-target
+contact or assuming that every held object is a tool.
 Camera labels and snapshot timestamps identify the inputs. When a helper view is
 present, a short explanation identifies it as a wrist-mounted view of the same
 scene, useful for local contact/holding/release observations. It explains that
@@ -411,9 +417,18 @@ can be used immediately after its dry run. Each selected subtask receives an ini
 annotation and two critique/revision rounds. For 3–4 selected subtasks this is
 9–12 requests, plus any repairs/retries, rather than 207 requests for 69 nodes.
 The script prints the requested, cached and pending node counts before API work.
-Missing or truncated captions remain review items;
+Missing or truncated captions require review when they materially affect the annotation;
 task text is intended context, not proof of success. Desired completion conditions
 are not observed success labels.
+
+Claude's aggregation prompt restricts action evidence to the current interval,
+distinguishes omissions from contradictions at overlapping times, and compares
+specific observations with broad no-motion claims without automatically favoring
+either. It uses supported appearance-based object names when identity is uncertain.
+Review focuses on uncertainty that affects actions, targets, destinations or
+timing; minor color differences, expected transitions and missing episode-level
+completion do not automatically constitute conflicts. Use a new aggregation
+output directory for this prompt version; Qwen captions need not be regenerated.
 
 To skip the two critique/revision passes, add `--no-review`:
 

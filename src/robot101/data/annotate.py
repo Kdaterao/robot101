@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "description-object-interactions-pov-v22"
+CAPTION_PROMPT_VERSION = "description-temporal-comparison-tools-pov-v24"
 
 
 def build_parser():

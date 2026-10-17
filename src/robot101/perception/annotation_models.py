@@ -111,11 +111,21 @@ class Captioner:
         for request in requests:
             # Original neutral caption instruction, before later robotics prompt revisions.
             prompt = "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."
+            if self.kind == "video":
+                prompt += (
+                    " Compare the beginning, middle and end of the clip. Describe changes in the arm's "
+                    "position relative to scene objects and changes in contact or holding. Do not judge "
+                    "the whole clip from one frame."
+                )
             prompt += (
                 " Focus on how the robotic arm interacts with objects in the scene: its movement "
                 "relative to them, visible contact, grasping, holding, moving objects and releasing them, "
                 "when these are observable. Describe the visible interaction rather than only listing "
-                "objects or describing the arm's posture."
+                "objects or describing the arm's posture. The arm may hold or wield a tool that interacts "
+                "with another object; interaction does not require direct contact between the gripper "
+                "fingers and the target. When visible, distinguish the held tool from the target object "
+                "and describe how the tool contacts or affects the target. Do not assume every held "
+                "object is a tool or invent tool use that is not visually supported."
             )
             previous = request.get("previous_subtask")
             if previous is not None:
