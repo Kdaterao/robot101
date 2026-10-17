@@ -100,29 +100,31 @@ class Captioner:
             tower.set_input_size(img_size=(320, 320))
 
     def caption(self, requests, max_tokens=1024):
-        conversations = []
+        conversations, flat_views = [], []
         for request in requests:
-            prompt = "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."
-            if request.get("gripper_hints") is not None:
-                import json
-                prompt += (
-                    "\nBase the action description on visual evidence: describe the object's position and motion "
-                    "relative to the gripper and support surface. Distinguish an attempted grasp from holding an object. "
-                    "For video, a successful grasp needs positive visual evidence such as the object being retained "
-                    "between the fingers and moving with the gripper; jaw closure is not that evidence. "
-                    "For a single image, report visible object/finger geometry without inventing a grasp sequence. "
-                    "When retention or contact is occluded or unclear, leave it unresolved rather than inferring success or failure. "
-                    "Only after describing the visual action, optionally use the sensor context below to clarify jaw "
-                    "posture or mechanical timing. Never use it to choose the object, decide grasp success, holding, "
-                    "object transport, release, placement or task completion. A gripper can close on empty space, "
-                    "or open when it was not holding anything. Do not repeat the sensor timeline as the main caption. "
-                    "Positions are normalized within this episode, not calibrated physical jaw widths. "
-                    "Hints refer to the stated source frames; changing states at different times can be a normal action sequence. "
-                    "If the signal is unavailable or ambiguous, say so rather than asserting a jaw state. "
-                    "Sensor context (jaw posture/timing only):\n" +
-                    json.dumps(request["gripper_hints"], separators=(",", ":")))
-            conversations.append([{"role": "user", "content": [
-                {"type": self.kind}, {"type": "text", "text": prompt}]}])
+            prompt = (
+                "Describe the visible actions and object movements in temporal order. "
+                if self.kind == "video" else
+                "Describe the visible objects and their spatial relationships at this instant. "
+            )
+            prompt += (
+                "The labeled camera views show the same scene at matching source times, not separate actions. "
+                "Use the primary view for the overall action and the helper view to clarify contact, object motion "
+                "or occlusion. Do not invent an extra object just because it appears in both views. "
+                "Describe what happens rather than guessing intentions from posture. Do not add task-success "
+                "or failure verdicts, sensor commentary, or an evidence audit. Mention uncertainty briefly only "
+                "when a relevant action cannot be seen. Do not infer that the whole interval is stationary "
+                "from one unchanged frame."
+            )
+            views = request.get("views") or [dict(camera="primary", role="primary", frames=request["frames"])]
+            content = [{"type": "text", "text": prompt}]
+            for view in views:
+                content.extend([{"type": "text", "text": f'{view["role"].title()} view: {view["camera"]}.'},
+                                {"type": self.kind}])
+                flat_views.append((request, view))
+            if len(views) == 1:
+                content.append({"type": "text", "text": "Only the primary view is available; do not assume helper-view evidence."})
+            conversations.append([{"role": "user", "content": content}])
         text = self.processor.apply_chat_template(conversations, tokenize=False, add_generation_prompt=True)
         if self.kind == "video":
             # Supply decoded sparse frames directly. Do not let the processor
@@ -135,12 +137,12 @@ class Captioner:
                 video_kwargs = dict(size={"shortest_edge": 308 ** 2, "longest_edge": 308 ** 2},
                                     video_metadata=[dict(fps=r["fps"], frames_indices=r["frame_indices"],
                                                          total_num_frames=r["total_num_frames"])
-                                                    for r in requests])
-            inputs = self.processor(text=text, videos=[r["frames"] for r in requests],
+                                                    for r, _ in flat_views])
+            inputs = self.processor(text=text, videos=[view["frames"] for _, view in flat_views],
                                     do_sample_frames=False, **video_kwargs,
                                     padding=True, return_tensors="pt")
         else:
-            inputs = self.processor(text=text, images=[r["frames"][0] for r in requests],
+            inputs = self.processor(text=text, images=[view["frames"][0] for _, view in flat_views],
                                     padding=True, return_tensors="pt")
         inputs = inputs.to(self.device)
         for key, value in inputs.items():

@@ -83,8 +83,8 @@ captions are retried. Incompatible settings require another output directory.
 | `--decode-batch-size` | `64` | CPU video decode batch |
 | `--video-frames` | `32` | Uniform sparse frames per internal-node caption |
 | `--max-caption-tokens` | `1024` | Generation cap per caption |
-| `--gripper-hints` / `--no-gripper-hints` | enabled | Supply recorded gripper position/transition hints to captioners |
-| `--gripper-open-direction` | `increasing` | Use `decreasing` if lower sensor values indicate opening |
+| `--helper-view` / `--no-helper-view` | enabled | Supply synchronized helper-camera frames during captioning |
+| `--helper-camera` | `wrist` | Helper camera; primary view and JEPA still use `--camera` |
 | `--min-duration` | `0.5` | Keep hierarchy nodes strictly longer than this many seconds |
 | `--max-segments` | `8` | Largest candidate count for the exported subtask cut |
 | `--silhouette-threshold` | `0.15` | Minimum score for a multi-subtask cut |
@@ -146,54 +146,53 @@ node duration and sampled indices determine the effective sparse-video FPS;
 Qwen2.5 represents timing using uniform spacing rather than per-frame timestamps.
 Very short clips may repeat frame indices to satisfy the
 requested count; the actual indices and timestamps are saved. Episode task text
-is not used to imply observed actions or success. Measured gripper context is
-now supplied to captioners by default, an explicit robotics adaptation.
+is not used to imply observed actions or success. A synchronized wrist/POV view
+is supplied as visual helper context by default, an explicit robotics adaptation.
 
-### Gripper sensor hints before captioning
+### Synchronized POV helper view
 
-The script reads the recorded observation-state gripper signal, smooths it with
-a five-frame moving average, and normalizes it against the episode's observed
-range. The lower 15% is `likely_closed` and the upper 15% is `likely_open` when
-opening increases the signal; other positions are `intermediate`. Constant,
-missing or invalid signals remain unavailable/unknown, rather than inventing a
-jaw state. The thresholds are episode-relative, not calibrated physical limits;
-an episode containing only partial motion may not establish fully open/closed jaws.
+Captioning uses the primary camera (`--camera top` by default) together with a
+wrist/POV helper (`--helper-camera wrist`). Each video caption receives two
+labeled clips with the exact same source frame IDs, 32 sparse frames per view
+by default; image captions receive both camera images at the same midpoint.
+Models receive these as separate visual inputs, not a stitched image. JEPA still
+segments only the primary camera and its boundaries are unchanged.
 
-Qwen receives compact sampled-state spans and in-interval opening/closing events
-as text with source-frame timing. Image captions receive only the sampled
-instant's position hints. State changes at different times are normal transitions,
-not automatic contradictions. Sensor closing does not prove contact or grasp;
-opening does not prove release of an object or task completion. No sensor text
-is burned into the clean images or videos. Hint provenance is saved with each
-caption and passed to Haiku as evidence; JEPA boundaries stay unchanged.
-
-Caption prompts explicitly prioritize visible object/finger geometry and object
-motion over telemetry. Sensor hints may clarify jaw posture/timing only; they
-must not establish object identity, grasp success, holding, transport or placement.
-For video, an object retained between the fingers and moving with the gripper is
-positive visual evidence; closure alone is not. Occlusion leaves success/failure
-unresolved. Single images must not invent a grasp sequence. Haiku follows the
-same distinction when standardizing captions. These are prompting safeguards,
-not a guarantee that the VLM will obey them: compare outputs on the same episodes
-with `--no-gripper-hints` before choosing which labels to keep.
-
-The visual-first caption and aggregation prompts are versioned. Use fresh output
-directories after this update; old sensor-biased captions are not rewritten by
-resuming their cached run. Compatible JEPA caches remain reusable.
+Prompts ask for observed actions, object movement and spatial relationships,
+without guessing intent or adding grasp-success/failure verdicts. The wrist view
+helps clarify contact and occlusion; it depicts the same scene, not additional
+objects or actions. Gripper sensor input has been removed from Qwen and Haiku
+prompts. Raw gripper metadata may remain in episode sidecars for diagnostics.
+The old `--gripper-hints` and `--gripper-open-direction` options are removed.
 
 ```bash
 python -m robot101.data.annotate --episodes 0 \
-  --output-dir outputs/annotations_gripper_hints \
+  --output-dir outputs/annotations_pov_helper \
+  --camera top --helper-camera wrist \
   --max-caption-tokens 512 --video-batch-size 4 --image-batch-size 4 \
-  --push-to-hub --dst-repo-id kdaterao/so101_action_annotations_gripper_hints
+  --push-to-hub --dst-repo-id kdaterao/so101_action_annotations_pov_helper
 ```
 
-Use `--gripper-open-direction decreasing` for a dataset with reversed gripper
-conventions, or `--no-gripper-hints` for a vision-only comparison. Use a new
-output directory for the new caption prompts; compatible JEPA feature/segment
-caches can still be reused using the cache-copy procedure below.
+Two views increase visual tokens and VRAM per node. Start with smaller batches
+than the old single-view batch of 36 and measure usage before increasing them.
+Use `--no-helper-view` for a primary-only comparison. If both camera options name
+the same camera, it is sent only once. If any requested helper frame for a node
+is missing, or helper decoding fails, only its primary view is used; the result's
+`helper_status` explains why. No black placeholder or nearby-frame substitution
+is sent as a helper observation.
 
-### Reusing JEPA results after changing video models
+Each caption records its actual camera views, sample IDs, prompt version and
+helper availability. Primary inspection images retain the existing paths; helper
+images are saved under `images/epXXXXXX/wrist/`. The browser viewer and HTML
+reports display both views with camera labels. Original videos remain clean.
+
+Use new caption and aggregation output directories for this prompt/input change;
+resuming old sensor-biased captions will not replace them. Compatible JEPA feature
+and segment caches can be reused with the procedure below. For Haiku, use the
+new annotation repository with `--no-review` if only the initial annotation is
+wanted; no images or gripper measurements are sent to that text-only API.
+
+### Reusing JEPA results after captioning changes
 
 Changing models requires a new output directory. To reuse completed segmentation
 from the previous PerceptionLM run, copy only its feature and segment caches.
@@ -364,7 +363,7 @@ transient retries. JSON validation, immutable-bound checks, the one malformed
 output repair attempt, uncertainty flags and `review.json` remain active. The
 flag skips model critique passes; it does not declare annotations human-verified.
 Use a new output directory when changing effective rounds. The updated
-gripper-aware/temporal evidence prompt also requires a new aggregation output
+multiview/temporal evidence prompt also requires a new aggregation output
 directory when upgrading older runs.
 
 #### 4. Inspect results, resume, and optionally upload

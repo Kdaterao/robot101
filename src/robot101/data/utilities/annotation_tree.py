@@ -247,7 +247,16 @@ def write_report(root, record):
     for node in sorted(record["nodes"], key=lambda n: (n["start_frame"], n["end_frame"])):
         caption = node.get("caption", {})
         sample = caption.get("sample_frames", [])
-        images = "".join(f'<img width="160" src="../images/ep{record["episode_index"]:06d}/f{i:06d}.jpg">' for i in dict.fromkeys(sample))
+        views = caption.get("views") or [dict(camera=record.get("camera", "primary"), image_subdir="")]
+        images = ""
+        for view in views:
+            subdir = str(view.get("image_subdir", ""))
+            if subdir and (not subdir.replace("_", "").replace("-", "").isalnum()):
+                continue
+            images += f'<p>{html.escape(str(view.get("camera", "primary")))}</p>'
+            images += "".join(f'<img width="160" src="../images/ep{record["episode_index"]:06d}/'
+                              f'{html.escape(subdir + "/" if subdir else "", quote=True)}f{i:06d}.jpg">'
+                              for i in dict.fromkeys(sample))
         rows.append(f'<tr><td>{node["id"]}</td><td>{node["start_frame"]}–{node["end_frame"]}</td>'
                     f'<td>{"selected" if node["id"] in record["selected_node_ids"] else "context"}</td>'
                     f'<td>{html.escape(caption.get("text", caption.get("error", "pending")))}</td><td>{images}</td></tr>')

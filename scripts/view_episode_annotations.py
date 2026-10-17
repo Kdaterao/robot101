@@ -71,7 +71,9 @@ function render(){
  $('action').style.whiteSpace='pre-wrap';$('originalbox').hidden=!a;$('original').textContent=n.caption?.text||'Unavailable';
  $('reviewbox').hidden=!a;$('review').textContent=a?JSON.stringify({robotics:a.robotics,critique:a.critique},null,2):'';
  const ids=[...new Set(c.sample_frames||n.preview_frames||[])];
- for(const id of ids){const figure=document.createElement('figure'),img=document.createElement('img'),label=document.createElement('figcaption');img.loading='lazy';img.src=`/images/ep${String(episodeId).padStart(6,'0')}/f${String(id).padStart(6,'0')}.jpg`;img.alt=`Source frame ${id}`;img.onerror=()=>{img.remove();label.textContent+= ' · image unavailable'};label.textContent=`Frame ${id} · ${(id/current.fps).toFixed(2)} s`;figure.append(img,label);$('frames').append(figure)}
+ const views=n.caption?.views?.length?n.caption.views:[{camera:current.camera,image_subdir:'',sample_frames:ids}];
+ for(const id of ids)for(const view of views){const sub=view.image_subdir||'';if(!/^[A-Za-z0-9_-]*$/.test(sub))continue;const figure=document.createElement('figure'),img=document.createElement('img'),label=document.createElement('figcaption');img.loading='lazy';img.src=`/images/ep${String(episodeId).padStart(6,'0')}/${sub?encodeURIComponent(sub)+'/':''}f${String(id).padStart(6,'0')}.jpg`;img.alt=`${view.camera} frame ${id}`;img.onerror=()=>{img.remove();label.textContent+= ' · image unavailable'};label.textContent=`${view.camera} · frame ${id} · ${(id/current.fps).toFixed(2)} s`;figure.append(img,label);$('frames').append(figure)}
+ if(n.caption?.helper_status)$('state').textContent+=` · helper: ${n.caption.helper_status}`;
  if(!ids.length)$('frames').textContent='No saved inspection frames for this node yet.';
 }
 async function load(){try{const response=await fetch('/catalog',{cache:'no-store'});if(!response.ok)throw Error(await response.text());const data=await response.json();catalog=data.episodes;if(!catalog.some(e=>e.episode_index===episodeId))episodeId=catalog[0]?.episode_index;$('episode').replaceChildren();for(const e of catalog)$('episode').add(new Option(`Episode ${e.episode_index}`,e.episode_index));$('episode').value=String(episodeId);$('status').textContent=data.errors.join(' · ')||(!catalog.length?'No segmentation artifacts found yet.':'');render()}catch(e){$('status').textContent=String(e)}}
@@ -190,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/catalog":
             payload = json.dumps(load_catalog(self.root, self.limit, self.selected)).encode()
             content_type = "application/json"
-        elif re.fullmatch(r"/images/ep\d+/f\d+\.jpg", path):
+        elif re.fullmatch(r"/images/ep\d+/(?:[A-Za-z0-9_-]+/)?f\d+\.jpg", path):
             relative = path.lstrip("/")
             if self.hub_image:
                 episode = int(relative.split("/")[1][2:])

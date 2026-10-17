@@ -14,7 +14,7 @@ from robot101.data.utilities.annotation_tree import (
 )
 from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
-PROMPT_VERSION = "action100m-robotics-v3-visual-evidence"
+PROMPT_VERSION = "action100m-robotics-v4-multiview"
 STRING_FIELDS = ("brief_action", "detailed_action", "actor", "brief_caption", "detailed_caption")
 ROBOTICS_FIELDS = ("manipulated_object", "destination", "completion_condition")
 
@@ -48,7 +48,8 @@ def build_evidence(record, node):
         return dict(node_id=n["id"], start_frame=n["start_frame"], end_frame=n["end_frame"],
                     kind=n["caption_kind"], text=result.get("text"), status=result.get("status", "missing"),
                     truncated=result.get("truncated", False), error=result.get("error"),
-                    sample_frames=result.get("sample_frames", []), gripper_hints=result.get("gripper_hints"))
+                    sample_frames=result.get("sample_frames", []),
+                    views=result.get("views", []), helper_status=result.get("helper_status"))
     lookup = {n["id"]: n for n in record["nodes"]}
     root = lookup[record["root_id"]]
     return dict(episode_index=record["episode_index"], source_repo_id=record["source_repo_id"],
@@ -75,10 +76,8 @@ def request_prompt(evidence, previous=None):
         "The task is intended context, not proof of observed success. Missing, truncated, conflicting or uncertain "
         "evidence requires review. Do not invent objects, successful outcomes, pixel points or masks. "
         "Completion condition describes a desired outcome, not a success verdict. "
-        "Recorded gripper hints are measured episode-relative positions, not proof of grasp/contact or release of an object. "
-        "Use sensor hints only for jaw posture/timing. Do not promote closure into successful grasp, holding or transport, "
-        "or opening into object release/placement. These claims need explicit visual observations in the supplied captions. "
-        "If a caption's only support for grasp success is the sensor hint, preserve it as uncertain rather than accepting it. "
+        "Describe observed actions rather than producing a success/failure audit in the action or caption fields. "
+        "Synchronized camera views describe one scene, not separate actions or extra actors. "
         "Compare observations at their source frames: open followed by closed can be a normal transition, not a contradiction. "
         "A midpoint image is an instant and cannot establish that an entire interval was stationary. "
         "An approach subtask need not complete the episode-level placement goal; missing placement alone is not a conflict. "

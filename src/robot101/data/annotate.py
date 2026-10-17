@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from contextlib import contextmanager
-from robot101.data.utilities.gripper_hints import GRIPPER_PROMPT_VERSION
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 from time import perf_counter
@@ -26,12 +26,18 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
+CAPTION_PROMPT_VERSION = "multiview-observation-v4"
+
+
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--src-repo-id", default=DEFAULT_SRC)
     p.add_argument("--src-revision", default=None, help="Default: LeRobot's compatible dataset revision")
     p.add_argument("--episodes", default="0", help="Inclusive ranges, e.g. 0-25:5")
     p.add_argument("--camera", default="top")
+    p.add_argument("--helper-camera", default="wrist", help="Synchronized auxiliary camera for captioning")
+    p.add_argument("--helper-view", action=argparse.BooleanOptionalAction, default=True,
+                   help="Include the helper camera in captions; JEPA still uses only --camera")
     p.add_argument("--output-dir", type=Path, default=Path("outputs/annotations"))
     p.add_argument("--stage", choices=["all", "segment", "caption"], default="all")
     p.add_argument("--resume", action="store_true")
@@ -57,10 +63,6 @@ def build_parser():
     p.add_argument("--video-batch-size", type=int, default=1)
     p.add_argument("--image-batch-size", type=int, default=1)
     p.add_argument("--max-caption-tokens", type=int, default=1024)
-    p.add_argument("--gripper-hints", action=argparse.BooleanOptionalAction, default=True,
-                   help="Provide likely gripper positions/transitions from recorded state to captioners")
-    p.add_argument("--gripper-open-direction", choices=["increasing", "decreasing"], default="increasing",
-                   help="Whether larger gripper values indicate opening")
     add_hub_arguments(p)
     return p
 
@@ -81,7 +83,7 @@ def resolve_run(args):
     requested = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
                  if k not in {"episodes", "stage", "resume", "output_dir", "download_workers",
                               "push_to_hub", "dst_repo_id", "hub_private"}}
-    requested["caption_prompt_version"] = GRIPPER_PROMPT_VERSION if args.gripper_hints else "neutral-detailed-v1"
+    requested["caption_prompt_version"] = CAPTION_PROMPT_VERSION
     path = args.output_dir / "run.json"
     key = fingerprint(requested)
     existing = cached_json(path, key, args.resume)
@@ -205,7 +207,6 @@ def episode_timer(record, phase):
 def caption_records(args, run, records, source, kind, worker_factory):
     from PIL import Image
     from robot101.perception.annotation_models import release
-    from robot101.data.utilities.gripper_hints import build_gripper_hints
     worker = None
     batch_size = args.video_batch_size if kind == "video" else args.image_batch_size
     try:
@@ -216,13 +217,11 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     if node["caption_kind"] != kind:
                         continue
                     indices = uniform_frames(node, args.video_frames) if kind == "video" else [midpoint(node)]
-                    hints = (build_gripper_hints(record, node, indices, kind=kind,
-                                 open_direction=args.gripper_open_direction) if args.gripper_hints else None)
-                    prompt_version = GRIPPER_PROMPT_VERSION if args.gripper_hints else "neutral-detailed-v1"
+                    prompt_version = CAPTION_PROMPT_VERSION
                     key = fingerprint(dict(segment=record["fingerprint"], node=node, model=run["resolved"][kind],
                                            model_id=args.video_model if kind == "video" else args.image_model,
                                            sample_frames=indices, tokens=args.max_caption_tokens, prompt=prompt_version,
-                                           gripper_hints=hints,
+                                           helper_camera=args.helper_camera if args.helper_view else None,
                                            dtype=args.dtype, adapter="direct-frames-metadata-v2"))
                     path = args.output_dir / "node_captions" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
                     cached = cached_json(path, key, args.resume)
@@ -237,7 +236,10 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     ds = source(record["episode_index"])
                     record.setdefault("caption_timings", {})[f"{kind}_source_load_seconds"] = perf_counter() - start
                     start = perf_counter()
-                    data = load_episode_metadata(ds, [args.camera], preserve_auxiliary=False)
+                    cameras = [args.camera]
+                    if args.helper_view and args.helper_camera != args.camera:
+                        cameras.append(args.helper_camera)
+                    data = load_episode_metadata(ds, cameras, preserve_auxiliary=False)
                     record["caption_timings"][f"{kind}_metadata_seconds"] = perf_counter() - start
                     start = perf_counter()
                     indices = sorted({i for _, ids, _, _ in jobs for i in ids})
@@ -250,6 +252,18 @@ def caption_records(args, run, records, source, kind, worker_factory):
                         node["caption"] = result
                     continue
                 record.setdefault("caption_timings", {})[f"{kind}_decode_seconds"] = perf_counter() - start
+                helper_error = None
+                if len(cameras) > 1:
+                    helper_start = perf_counter()
+                    try:
+                        helper_indices = [i for i in indices if data["masks"][args.helper_camera][i]]
+                        if helper_indices:
+                            decode_episode_cameras(ds, data, [args.helper_camera], indices=helper_indices,
+                                                   batch_size=args.decode_batch_size, backend=args.video_backend)
+                    except Exception as exc:
+                        helper_error = f"helper_decode_failed: {exc}"
+                        data["masks"][args.helper_camera][:] = False
+                    record["caption_timings"][f"{kind}_helper_decode_seconds"] = perf_counter() - helper_start
                 for offset in range(0, len(jobs), batch_size):
                     batch = jobs[offset:offset + batch_size]
                     requests, valid_jobs = [], []
@@ -259,18 +273,31 @@ def caption_records(args, run, records, source, kind, worker_factory):
                             atomic_json(path, result)
                             node["caption"] = result
                             continue
-                        frames = [data["frames"][args.camera][i] for i in ids]
+                        view_names = [args.camera]
+                        helper_status = "disabled" if not args.helper_view else "same_as_primary"
+                        if len(cameras) > 1:
+                            helper_status = "missing_synchronized_helper_frames"
+                            if (all(data["masks"][args.helper_camera][ids]) and
+                                    all(data.get("frames", {}).get(args.helper_camera, [None] * data["n"])[i] is not None for i in ids)):
+                                view_names.append(args.helper_camera)
+                                helper_status = "used"
                         image_root = args.output_dir / "images" / f'ep{record["episode_index"]:06d}'
                         image_root.mkdir(parents=True, exist_ok=True)
-                        for i, frame in zip(ids, frames, strict=True):
-                            Image.fromarray(frame).save(image_root / f"f{i:06d}.jpg", quality=85)
-                        if kind == "video":
-                            frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
-                        requests.append(dict(frames=np.stack(frames), fps=record["fps"],
+                        views = []
+                        for camera in view_names:
+                            frames = [data["frames"][camera][i] for i in ids]
+                            directory = image_root if camera == args.camera else image_root / camera
+                            directory.mkdir(parents=True, exist_ok=True)
+                            for i, frame in zip(ids, frames, strict=True):
+                                Image.fromarray(frame).save(directory / f"f{i:06d}.jpg", quality=85)
+                            if kind == "video":
+                                frames = [np.asarray(Image.fromarray(frame).resize((320, 320), Image.Resampling.BICUBIC)) for frame in frames]
+                            views.append(dict(camera=camera, frames=np.stack(frames),
+                                              role="primary" if camera == args.camera else "helper"))
+                        requests.append(dict(frames=views[0]["frames"], views=views, fps=record["fps"],
                                              frame_indices=[i - node["start_frame"] for i in ids],
                                              total_num_frames=node["end_frame"] - node["start_frame"],
-                                             gripper_hints=(build_gripper_hints(record, node, ids, kind=kind,
-                                                 open_direction=args.gripper_open_direction) if args.gripper_hints else None)))
+                                             helper_status=helper_error or helper_status))
                         valid_jobs.append((node, ids, path, key))
                     if not valid_jobs:
                         continue
@@ -290,8 +317,10 @@ def caption_records(args, run, records, source, kind, worker_factory):
                         result.update(fingerprint=key, kind=kind, sample_frames=ids,
                                       sample_timestamps=[data["timestamps"][i] for i in ids],
                                       model_revision=run["resolved"][kind], seconds=seconds / len(valid_jobs))
-                        if request["gripper_hints"] is not None:
-                            result["gripper_hints"] = request["gripper_hints"]
+                        result["views"] = [dict(camera=view["camera"], role=view["role"], sample_frames=ids,
+                                               image_subdir="" if view["role"] == "primary" else view["camera"])
+                                           for view in request["views"]]
+                        result["helper_status"] = request["helper_status"]
                         result["prompt_version"] = prompt_version
                         result.setdefault("status", "ok")
                         atomic_json(path, result)
@@ -313,6 +342,8 @@ def main(argv=None):
 
 def _run(args, usage):
     validate_hub_arguments(args)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.helper_camera):
+        raise SystemExit("--helper-camera must be a camera name without path separators")
     for name in ("download_workers", "decode_batch_size", "sample_step", "jepa_batch_size", "max_segments",
                  "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens"):
         if getattr(args, name) < 1:
