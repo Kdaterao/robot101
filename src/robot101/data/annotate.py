@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import json
 import os
 import re
+import sys
 from pathlib import Path
 import tempfile
 from time import perf_counter
@@ -26,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-observation-v4"
+CAPTION_PROMPT_VERSION = "multiview-contact-helper-v5"
 
 
 def build_parser():
@@ -204,6 +205,15 @@ def episode_timer(record, phase):
         record.setdefault("processing_timings", {})[f"{phase}_seconds"] = perf_counter() - started
 
 
+def caption_failure_warning(record, kind, node_ids, error):
+    print(f'[CAPTION FAILED] episode={record["episode_index"]} kind={kind} '
+          f'nodes={",".join(node_ids)}\n  {error}', file=sys.stderr, flush=True)
+    if "out of memory" in str(error).lower():
+        flag = "--video-batch-size" if kind == "video" else "--image-batch-size"
+        print(f"  CUDA memory limit exceeded: lower {flag}. Two camera views increase memory per node. "
+              "This batch was saved as failed; it was not retried automatically.", file=sys.stderr, flush=True)
+
+
 def caption_records(args, run, records, source, kind, worker_factory):
     from PIL import Image
     from robot101.perception.annotation_models import release
@@ -246,6 +256,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     decode_episode_cameras(ds, data, [args.camera], indices=indices,
                                            batch_size=args.decode_batch_size, backend=args.video_backend)
                 except Exception as exc:
+                    caption_failure_warning(record, kind, [node["id"] for node, _, _, _ in jobs], exc)
                     for node, indices, path, key in jobs:
                         result = dict(fingerprint=key, status="failed", error=str(exc), sample_frames=indices, kind=kind)
                         atomic_json(path, result)
@@ -262,6 +273,8 @@ def caption_records(args, run, records, source, kind, worker_factory):
                                                    batch_size=args.decode_batch_size, backend=args.video_backend)
                     except Exception as exc:
                         helper_error = f"helper_decode_failed: {exc}"
+                        print(f'[HELPER UNAVAILABLE] episode={record["episode_index"]} kind={kind}: '
+                              f'{exc}; using primary view only.', file=sys.stderr, flush=True)
                         data["masks"][args.helper_camera][:] = False
                     record["caption_timings"][f"{kind}_helper_decode_seconds"] = perf_counter() - helper_start
                 for offset in range(0, len(jobs), batch_size):
@@ -270,6 +283,7 @@ def caption_records(args, run, records, source, kind, worker_factory):
                     for node, ids, path, key in batch:
                         if not all(data["masks"][args.camera][ids]) or any(data["frames"][args.camera][i] is None for i in ids):
                             result = dict(fingerprint=key, status="failed", error="missing_caption_frame", sample_frames=ids, kind=kind)
+                            caption_failure_warning(record, kind, [node["id"]], "missing_caption_frame")
                             atomic_json(path, result)
                             node["caption"] = result
                             continue
@@ -306,11 +320,16 @@ def caption_records(args, run, records, source, kind, worker_factory):
                         # marking every node as if its visual input were invalid.
                         worker = worker_factory(kind)
                     start = perf_counter()
+                    print(f'{kind} ep{record["episode_index"]}: starting batch of {len(valid_jobs)} nodes '
+                          f'({len(requests[0]["views"])} view(s) for first node)', flush=True)
+                    batch_error = None
                     try:
                         results = worker.caption(requests, args.max_caption_tokens)
                         if len(results) != len(valid_jobs):
                             raise ValueError("Wrong number of captions")
                     except Exception as exc:
+                        batch_error = str(exc)
+                        caption_failure_warning(record, kind, [node["id"] for node, _, _, _ in valid_jobs], exc)
                         results = [dict(status="failed", error=str(exc)) for _ in valid_jobs]
                     seconds = perf_counter() - start
                     for (node, ids, path, key), request, result in zip(valid_jobs, requests, results, strict=True):
@@ -323,9 +342,13 @@ def caption_records(args, run, records, source, kind, worker_factory):
                         result["helper_status"] = request["helper_status"]
                         result["prompt_version"] = prompt_version
                         result.setdefault("status", "ok")
+                        if result["status"] != "ok" and batch_error is None:
+                            caption_failure_warning(record, kind, [node["id"]], result.get("error", result["status"]))
                         atomic_json(path, result)
                         node["caption"] = result
-                    print(f'{kind} ep{record["episode_index"]}: nodes {offset + len(batch)}/{len(jobs)}', flush=True)
+                    ok = sum(r.get("status") == "ok" for r in results)
+                    print(f'{kind} ep{record["episode_index"]}: processed {offset + len(batch)}/{len(jobs)} nodes '
+                          f'— batch succeeded={ok}, failed={len(results) - ok}, {seconds:.1f}s', flush=True)
     finally:
         release(worker)
 
@@ -435,13 +458,24 @@ def _run(args, usage):
             write_report(args.output_dir, record)
         exported = [json.loads(path.read_text()) for path in sorted((args.output_dir / "episodes").glob("ep*.json"))]
         write_exports(args.output_dir, exported)
+        caption_failures = [dict(episode_index=r["episode_index"], node_id=n["id"], stage="caption",
+                                 kind=n["caption_kind"], error=n["caption"].get("error", "caption_failed"))
+                            for r in records for n in r["nodes"] if n.get("caption", {}).get("status") == "failed"]
+        caption_counts = Counter(n.get("caption", {}).get("status", "pending") for r in records for n in r["nodes"])
+        atomic_json(args.output_dir / "caption_failures.json", caption_failures)
+        atomic_json(args.output_dir / "failures.json", [*failures, *caption_failures])
+        print(f'Caption results: succeeded={caption_counts["ok"]}, failed={caption_counts["failed"]}, '
+              f'pending={caption_counts["pending"]}', flush=True)
+        if caption_failures:
+            print(f'WARNING: {len(caption_failures)} captions failed; these outputs are incomplete. '
+                  f'See {args.output_dir / "caption_failures.json"}.', file=sys.stderr, flush=True)
         import resource
-        import sys
         peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         peak_ram_mib = peak_rss / (2**20 if sys.platform == "darwin" else 1024)
         atomic_json(args.output_dir / "summary.json", dict(episodes=len(records), skipped=failures,
                     retained_nodes=sum(len(r["nodes"]) for r in records), wall_seconds=perf_counter() - start,
                     episode_processing_times={str(r["episode_index"]): r["processing_timings"] for r in records},
+                    caption_counts=dict(caption_counts),
                     peak_cpu_ram_mib=peak_ram_mib,
                     peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else None))
     usage.finish(args.output_dir)
@@ -449,6 +483,8 @@ def _run(args, usage):
           f'({(perf_counter() - start) / 60:.1f} min), excluding upload.', flush=True)
     print(f"Saved caption trees and reports to {args.output_dir}")
     if args.push_to_hub:
+        if caption_failures:
+            print('WARNING: Uploading partial results, including failed-caption diagnostics.', file=sys.stderr, flush=True)
         publish_annotations(args.output_dir, args.dst_repo_id, "captioning", private=args.hub_private)
 
 

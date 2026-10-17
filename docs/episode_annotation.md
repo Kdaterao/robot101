@@ -107,6 +107,15 @@ the script does not silently change batch size. Use another output directory
 when changing settings. `--video-frames 16` and smaller token caps are explicit
 efficiency deviations from the paper's captioning recipe.
 
+Caption batches print their starting size, succeeded/failed counts and elapsed
+seconds. CUDA OOM and other caption errors print immediately to stderr with
+episode, caption kind and affected node IDs; progress counts mean processed
+nodes, not guaranteed successes. The final summary prints caption counts, writes
+`caption_failures.json` and includes caption failures in `failures.json`.
+`summary.json` records `caption_counts`. Failed captions remain review items;
+uploads can contain partial results and print an explicit warning when they do.
+Fixed batching does not automatically shrink or retry an OOM batch.
+
 Each annotation invocation samples hardware usage approximately once per second.
 At completion or interruption it prints peak process-tree CPU usage, host CPU
 usage, process-tree RAM, and per-GPU utilization/VRAM, and writes
@@ -164,6 +173,15 @@ helps clarify contact and occlusion; it depicts the same scene, not additional
 objects or actions. Gripper sensor input has been removed from Qwen and Haiku
 prompts. Raw gripper metadata may remain in episode sidecars for diagnostics.
 The old `--gripper-hints` and `--gripper-open-direction` options are removed.
+
+The POV helper is restricted to local interaction cues (visible contact,
+object/finger relationships or separation). Its camera moves with the robot;
+an object moving upward in that image does not establish an object lift. World
+motion, lifting and translation must be supported by the primary third-person
+view. Prompts request detailed, concrete observed actions while excluding generic
+scene filler and success/failure audits. A token cap is a maximum, not a target;
+untruncated captions can finish well below it. This prompt change requires new
+caption and aggregation output directories.
 
 ```bash
 python -m robot101.data.annotate --episodes 0 \

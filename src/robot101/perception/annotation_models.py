@@ -103,14 +103,21 @@ class Captioner:
         conversations, flat_views = [], []
         for request in requests:
             prompt = (
-                "Describe the visible actions and object movements in temporal order. "
+                "Describe the visible actions and object movements in detail, in temporal order. "
                 if self.kind == "video" else
-                "Describe the visible objects and their spatial relationships at this instant. "
+                "Describe the visible objects and their spatial relationships in detail at this instant. "
             )
             prompt += (
                 "The labeled camera views show the same scene at matching source times, not separate actions. "
-                "Use the primary view for the overall action and the helper view to clarify contact, object motion "
-                "or occlusion. Do not invent an extra object just because it appears in both views. "
+                "Use the primary third-person view to describe the overall action, object location and world motion. "
+                "Use the helper POV mainly for local interaction evidence: visible contact, whether an object is "
+                "between the fingers, or whether it visibly separates from them. The wrist camera moves with the arm. "
+                "An object moving upward, growing larger or shifting sideways in the POV can be caused entirely "
+                "by camera motion; this does not establish that the object was lifted or moved. "
+                "Do not infer object translation, lifting, transport or direction from POV image motion alone. "
+                "Describe these movements only when supported by the primary view; otherwise describe only the "
+                "local interaction that is actually visible. Do not invent an extra object just because it appears in both views. "
+                "Retain concrete action steps and relevant changes in object relationships; avoid generic scene filler. "
                 "Describe what happens rather than guessing intentions from posture. Do not add task-success "
                 "or failure verdicts, sensor commentary, or an evidence audit. Mention uncertainty briefly only "
                 "when a relevant action cannot be seen. Do not infer that the whole interval is stationary "

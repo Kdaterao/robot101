@@ -14,7 +14,7 @@ from robot101.data.utilities.annotation_tree import (
 )
 from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
-PROMPT_VERSION = "action100m-robotics-v4-multiview"
+PROMPT_VERSION = "action100m-robotics-v5-contact-helper"
 STRING_FIELDS = ("brief_action", "detailed_action", "actor", "brief_caption", "detailed_caption")
 ROBOTICS_FIELDS = ("manipulated_object", "destination", "completion_condition")
 
@@ -78,6 +78,8 @@ def request_prompt(evidence, previous=None):
         "Completion condition describes a desired outcome, not a success verdict. "
         "Describe observed actions rather than producing a success/failure audit in the action or caption fields. "
         "Synchronized camera views describe one scene, not separate actions or extra actors. "
+        "The wrist/POV helper supports local interaction evidence, not world-motion estimates: image motion "
+        "can be caused by the moving camera. Do not infer object lifting/translation from POV motion alone. "
         "Compare observations at their source frames: open followed by closed can be a normal transition, not a contradiction. "
         "A midpoint image is an instant and cannot establish that an entire interval was stationary. "
         "An approach subtask need not complete the episode-level placement goal; missing placement alone is not a conflict. "
