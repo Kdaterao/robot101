@@ -160,6 +160,10 @@ is supplied as visual helper context by default, an explicit robotics adaptation
 
 Captions explain the visible evidence supporting each described action (temporal
 changes, contact or object relationships), identifying the camera when relevant.
+They describe distinct action phases chronologically, including approach and
+retreat when visible, rather than reducing the caption to a final gripper state.
+Supporting observations are integrated into the action narrative. Rich detail
+is requested without assuming a fixed sequence of actions or adding repetition.
 Image-only captions use visible spatial/contact cues without inventing temporal
 changes. Evidence stays in the caption text. Use a new output directory for this
 prompt version; older caption runs cannot resume with the changed prompt.

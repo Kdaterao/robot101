@@ -109,6 +109,18 @@ class Captioner:
                 "Describe the visible objects and their spatial relationships in detail at this instant. "
             )
             prompt += (
+                "Be as descriptive and specific as the visible evidence allows. For video, describe the "
+                "whole sequence in chronological order using connected sentences, preserving each distinct "
+                "action phase rather than reporting only a final contact or gripper state. Include visible "
+                "approach, alignment, lowering, opening/closing, contact, lifting, transport, release and "
+                "retreat when they occur; these are possibilities, not a checklist of actions to assume. "
+                "Use concrete action verbs such as 'approaches the battery' when the primary clip supports "
+                "that motion. Describe the relevant starting arrangement, movement of the arm relative to "
+                "named objects, changes in orientation or contact, and ending arrangement. Integrate the "
+                "supporting visual observations into this description instead of replacing the action "
+                "narrative with an evidence-only statement. For a single image, be equally specific about "
+                "the visible arrangement without inventing motion. Do not add repetition or unsupported "
+                "details merely to increase length. "
                 "The labeled camera views show the same episode, not separate actions. Use the supplied "
                 "source times to relate sparse helper snapshots to the primary clip; their frame samples can differ. "
                 "Use the primary third-person view to describe the overall action, object location and world motion. "

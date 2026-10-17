@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "multiview-event-helper-previous-context-v12"
+CAPTION_PROMPT_VERSION = "multiview-descriptive-action-evidence-v13"
 
 
 def build_parser():
