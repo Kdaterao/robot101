@@ -158,6 +158,12 @@ requested count; the actual indices and timestamps are saved. Episode task text
 is not used to imply observed actions or success. A synchronized wrist/POV view
 is supplied as visual helper context by default, an explicit robotics adaptation.
 
+Captions explain the visible evidence supporting each described action (temporal
+changes, contact or object relationships), identifying the camera when relevant.
+Image-only captions use visible spatial/contact cues without inventing temporal
+changes. Evidence stays in the caption text. Use a new output directory for this
+prompt version; older caption runs cannot resume with the changed prompt.
+
 ### Synchronized POV helper view
 
 Captioning uses the primary camera (`--camera top` by default) together with a
