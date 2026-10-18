@@ -43,6 +43,7 @@ from robot101.data.utilities.episode_helpers import (
 from robot101.perception.molmo2 import Molmo2Worker
 from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT
 from robot101.data.utilities.gripper_filtering import prepare_gripper_filter
+from robot101.data.utilities.episode_gripper_masks import prepare_episode_masks, apply_episode_masks
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
 from robot101.data.utilities.annotation_tree import atomic_json, fingerprint
@@ -585,6 +586,8 @@ def main() -> None:
         raise SystemExit("Stage frame/count limits must be positive")
     if args.sam2_seed_search_frames < 1:
         raise SystemExit("--sam2-seed-search-frames must be positive")
+    if args.sam2_max_recoveries < 0 or args.sam2_recovery_retry_frames < 1:
+        raise SystemExit("SAM recovery count must be nonnegative and retry frames positive")
     if (not 0 < args.sam2_max_area_fraction <= 1
             or not np.isfinite(args.sam2_max_growth_ratio) or args.sam2_max_growth_ratio <= 1
             or not 0 <= args.sam2_growth_area_fraction <= 1):
@@ -624,7 +627,7 @@ def main() -> None:
                       if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
         annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
     goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1",
-                   "pov_mask_policy": "sequential_body_mask_object_negatives_v2",
+                   "pov_mask_policy": "full_episode_pov_initialization_recovery_v3" if args.sam2_full_episode else "sequential_body_mask_object_negatives_v2",
                    "mask_settings": {key: value for key, value in vars(args).items()
                                      if key.startswith("sam2_") and key != "sam2_corrections"},
                    "mask_corrections_fingerprint": fingerprint(json.loads(args.sam2_corrections.read_text()))
@@ -854,11 +857,18 @@ def main() -> None:
                     stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
                 )
                 tail_indices.update(range(window_start, window_end + 1))
-            decode_episode_cameras(source, data, [CAMERA_WRIST], indices=tail_indices,
+            decode_episode_cameras(source, data, [CAMERA_WRIST],
+                                   indices=None if sam is not None and args.sam2_full_episode else tail_indices,
                                    batch_size=args.decode_batch_size, backend=args.video_backend)
             episode_cache = []
             body_results = {}
-            if sam is not None and hasattr(molmo, "ground_batch"):
+            episode_masks = None
+            if sam is not None and args.sam2_full_episode:
+                validate_episode_shapes(data, src_meta.features, [CAMERA_WRIST])
+                episode_masks, episode_mask_valid, episode_mask_info = prepare_episode_masks(
+                    data['frames'][CAMERA_WRIST], data['masks'][CAMERA_WRIST],
+                    molmo, sam, bank_root, ep_idx, corrections, args)
+            if sam is not None and not args.sam2_full_episode and hasattr(molmo, "ground_batch"):
                 requests, request_stages = [], []
                 for si, stage in enumerate(stages):
                     if f"{ep_idx}:{si}" in corrections:
@@ -889,7 +899,10 @@ def main() -> None:
                     shared_features, num_queries, args.cluster_tail_frames, window_end,
                     f"ep{ep_idx}/stage{si}/tail")
                 entry["height"], entry["width"] = data["frames"][CAMERA_WRIST][0].shape[:2]
-                if sam is not None:
+                if episode_masks is not None:
+                    apply_episode_masks(entry, episode_masks, episode_mask_valid, episode_mask_info,
+                                        args.gripper_proximity_weight, args.gripper_proximity_radius, args.goal_tail_frames)
+                elif sam is not None:
                     prepare_gripper_filter(
                         entry, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST],
                         molmo, sam, bank_root, ep_idx, si, corrections,
@@ -901,6 +914,7 @@ def main() -> None:
                         max_growth_ratio=args.sam2_max_growth_ratio,
                         growth_area_fraction=args.sam2_growth_area_fraction)
                 episode_cache.append(entry)
+            del episode_masks
             tail_cache.append(episode_cache)
             cache_episode_ids.append(ep_idx)
             cache_stage_lists.append(stages)

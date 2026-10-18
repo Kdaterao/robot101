@@ -160,6 +160,13 @@ requesting episodes that never produced annotation artifacts. This does not
 recover missing annotation episodes or guarantee all 73 planned episodes exist.
 
 The new grounding flag is on by default and is explicit above for clarity.
+POV SAM masks now propagate across the full episode by default
+(`--sam2-full-episode`). Molmo initializes/reinitializes the POV mask only at
+startup or after invalid/lost masks, not at subtask boundaries. Third-person
+behavior is unchanged. Use a new destination if the previous run used masks only
+in clustering windows. Clustering itself still uses those windows. Recovery
+defaults: five automatic recoveries, with a 30-frame gap after a failed retry;
+unresolved masks are queued for human correction.
 It reuses the existing movement-based open/close detector and settings, including
 `--gripper-min-change-frac 0.25` and `--min-stage-frames 1`. Detected events split
 point computation inside each parent annotation interval; no interval crosses a

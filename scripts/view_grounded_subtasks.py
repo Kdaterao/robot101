@@ -60,21 +60,23 @@ HTML = r'''<!doctype html><meta charset="utf-8"><title>Grounded subtask viewer</
 <label><input id="auto" type="checkbox" checked>Automatically advance through subtasks and episodes</label>
 <p id="task"></p><p id="status">Loading metadata…</p><div class="cameras" id="cameras"></div>
 <input id="seek" type="range" min="0" max="1" step="1"><p id="position"></p><pre id="diagnostics"></pre>
-<p>Videos show clean footage; point heatmaps are drawn from the episode tracking sidecar. If a video cannot play, try a browser with AV1 support.</p>
+<p>Videos show clean footage; grounding dots and POV SAM 2 masks are drawn from saved sidecars. Green: current points. Cyan: previous points. Magenta: gripper mask. If a video cannot play, try a browser with AV1 support.</p>
 <script>
 const $=id=>document.getElementById(id);let catalog,ei=0,si=0,media=[],master=null,serial=0,transition=false,pending=false;const trackCache={};
 function current(){return catalog.episodes[ei].subtasks[si]}
 function pause(){media.forEach(m=>m.video.pause())}
 async function play(){if(!master)return;try{await Promise.all(media.map(m=>m.video.play()))}catch(e){pause();$('status').textContent='Playback failed: '+e.message}}
 function seek(frame){const e=catalog.episodes[ei];media.forEach(m=>{m.video.currentTime=m.offset+frame/e.fps})}
-async function loadTracks(episode){if(trackCache[episode])return trackCache[episode];const response=await fetch(`/tracks/${episode}`);if(!response.ok)throw Error(`Could not load tracks for episode ${episode}`);trackCache[episode]=await response.json();return trackCache[episode]}
-function pointsAt(camera,frame){const data=trackCache[catalog.episodes[ei].episode];if(!data)return [];const stage=data.stages.find(x=>frame>=x.start_frame&&frame<=x.end_frame);if(!stage)return [];const local=frame-stage.start_frame,third=stage.third_person[camera],sets=camera==='wrist'?[stage.pov,stage.previous_pov]:[third,third?.transition],points=[];for(const set of sets){if(!set||!set.tracks||!set.visibility)continue;for(let i=0;i<set.tracks.length;i++){if(set.visibility[i]?.[local]){const p=set.tracks[i]?.[local];if(p&&Number.isFinite(p[0])&&Number.isFinite(p[1]))points.push(p)}}}return points}
-function drawHeatmap(item,frame){const {canvas,ctx,name}=item;if(!canvas.width||!canvas.height)return;const data=trackCache[catalog.episodes[ei].episode],w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);if(!data?.clean_video){item.lastFrame=frame;return}const points=pointsAt(name,frame);if(!points.length){item.lastFrame=frame;return}const sigma=(data.sigma||40)/4,rad=Math.max(3,Math.round(3*sigma)),s2=2*sigma*sigma,heat=new Float32Array(w*h);let max=0;for(const p of points){const cx=Math.round(p[0]/4),cy=Math.round(p[1]/4);for(let y=Math.max(0,cy-rad);y<=Math.min(h-1,cy+rad);y++)for(let x=Math.max(0,cx-rad);x<=Math.min(w-1,cx+rad);x++){const dx=x-cx,dy=y-cy,i=y*w+x;heat[i]+=Math.exp(-(dx*dx+dy*dy)/s2);if(heat[i]>max)max=heat[i]}}if(!max){item.lastFrame=frame;return}const image=ctx.createImageData(w,h),alpha=Math.round(255*(data.alpha??0.55));for(let i=0;i<heat.length;i++){const v=heat[i]/max,j=i*4;image.data[j]=Math.round(255*Math.max(0,Math.min(1,1.5-Math.abs(4*v-3))));image.data[j+1]=Math.round(255*Math.max(0,Math.min(1,1.5-Math.abs(4*v-2))));image.data[j+2]=Math.round(255*Math.max(0,Math.min(1,1.5-Math.abs(4*v-1))));image.data[j+3]=alpha}ctx.putImageData(image,0,0);item.lastFrame=frame}
+async function loadTracks(episode){if(trackCache[episode])return trackCache[episode];const response=await fetch(`/tracks/${episode}`);if(!response.ok)throw Error(`Could not load tracks for episode ${episode}`);trackCache[episode]=await response.json();for(const m of trackCache[episode].masks||[]){if(m.bits){const raw=atob(m.bits);m.bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));m.frameMap=new Map(m.frames.map((f,i)=>[f,i]));delete m.bits;}}return trackCache[episode]}
+function pointsAt(camera,frame){const data=trackCache[catalog.episodes[ei].episode];if(!data)return [];const stage=data.stages.find(x=>frame>=x.start_frame&&frame<=x.end_frame);if(!stage)return [];const local=frame-stage.start_frame,third=stage.third_person[camera],sets=camera==='wrist'?[stage.pov,stage.previous_pov]:[third,third?.transition],points=[];sets.forEach((set,j)=>{if(!set?.tracks||!set.visibility)return;for(let i=0;i<set.tracks.length;i++){if(set.visibility[i]?.[local]){const p=set.tracks[i]?.[local];if(p&&Number.isFinite(p[0])&&Number.isFinite(p[1]))points.push({xy:p,color:j?'#00ffff':'#00ff00'})}}});return points}
+function drawHeatmap(item,frame){const {canvas,ctx,name}=item,w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);const data=trackCache[catalog.episodes[ei].episode];if(!data||data.debug_overlays){item.lastFrame=frame;return}
+if(name==='wrist'){let status='SAM 2: outside mask window';for(const m of data.masks||[]){if(!m.window||frame<m.window[0]||frame>m.window[1])continue;status=m.status==='disabled'?'SAM 2: disabled':'SAM 2: mask unavailable / REVIEW';const i=m.frameMap?.get(frame);if(i===undefined||m.shape?.[1]!==h||m.shape?.[2]!==w)continue;const stride=Math.ceil(w/8),image=ctx.createImageData(w,h),start=i*h*stride;for(let y=0;y<h;y++)for(let x=0;x<w;x++){if(m.bytes[start+y*stride+(x>>3)]&(1<<(7-(x%8)))){const k=(y*w+x)*4;image.data[k]=255;image.data[k+2]=255;image.data[k+3]=100}}ctx.putImageData(image,0,0);status=m.status==='ok'&&m.valid?.[i]!==false?'SAM 2: mask':'SAM 2: REJECTED mask / REVIEW';}ctx.font='14px system-ui';ctx.lineWidth=3;ctx.strokeStyle='black';ctx.strokeText(status,8,20);ctx.fillStyle='white';ctx.fillText(status,8,20);}
+for(const p of pointsAt(name,frame)){const [x,y]=p.xy;if(x<0||y<0||x>=w||y>=h)continue;ctx.beginPath();ctx.arc(x,y,5,0,2*Math.PI);ctx.fillStyle='black';ctx.fill();ctx.beginPath();ctx.arc(x,y,3,0,2*Math.PI);ctx.fillStyle=p.color;ctx.fill();}item.lastFrame=frame}
 function options(){const e=catalog.episodes[ei];$('episode').value=ei;$('subtask').replaceChildren();e.subtasks.forEach((s,j)=>$('subtask').add(new Option(`Subtask ${s.subtask ?? j}: ${s.primitive} [${s.start_frame}–${s.end_frame}]`,j)));$('subtask').value=si}
 async function load(resume=false){pause();const request=++serial;transition=true;const e=catalog.episodes[ei],s=current();options();$('status').textContent='Loading camera videos…';$('task').textContent=e.task;
 $('diagnostics').textContent=JSON.stringify({source_episode:e.source_episode,destination_episode:e.episode,boundary_mode:s.boundary_mode||'saved',saved_subtask_count:e.saved_subtask_count,displayed_subtask_count:e.subtasks.length,subtask:s.subtask,primitive:s.primitive,gripper_event:s.gripper_event,pov:s.pov,third_person:s.third_person},null,2);
 $('seek').min=s.start_frame;$('seek').max=s.end_frame;$('seek').value=s.start_frame;$('cameras').replaceChildren();media=[];master=null;
-try{const [loaded]=await Promise.all([Promise.all(e.cameras.map(cam=>new Promise((resolve,reject)=>{const div=document.createElement('div');div.className='camera';const label=document.createElement('h3');label.textContent=cam.name;const wrap=document.createElement('div');wrap.className='videowrap';const video=document.createElement('video');video.muted=true;video.playsInline=true;video.preload='auto';video.src=`/video/${e.episode}/${encodeURIComponent(cam.name)}`;const canvas=document.createElement('canvas');canvas.className='heatmap';const ctx=canvas.getContext('2d');wrap.append(video,canvas);div.append(label,wrap);$('cameras').append(div);video.onloadedmetadata=()=>{canvas.width=Math.max(1,Math.ceil(video.videoWidth/4));canvas.height=Math.max(1,Math.ceil(video.videoHeight/4));resolve({video,canvas,ctx,offset:cam.offset,name:cam.name,lastFrame:-1})};video.onerror=()=>reject(Error(`${cam.name}: could not load/decode video`))}))),loadTracks(e.episode)]);
+try{const [loaded]=await Promise.all([Promise.all(e.cameras.map(cam=>new Promise((resolve,reject)=>{const div=document.createElement('div');div.className='camera';const label=document.createElement('h3');label.textContent=cam.name;const wrap=document.createElement('div');wrap.className='videowrap';const video=document.createElement('video');video.muted=true;video.playsInline=true;video.preload='auto';video.src=`/video/${e.episode}/${encodeURIComponent(cam.name)}`;const canvas=document.createElement('canvas');canvas.className='heatmap';const ctx=canvas.getContext('2d');wrap.append(video,canvas);div.append(label,wrap);$('cameras').append(div);video.onloadedmetadata=()=>{canvas.width=video.videoWidth;canvas.height=video.videoHeight;resolve({video,canvas,ctx,offset:cam.offset,name:cam.name,lastFrame:-1})};video.onerror=()=>reject(Error(`${cam.name}: could not load/decode video`))}))),loadTracks(e.episode)]);
 if(request!==serial){loaded.forEach(m=>m.video.pause());return}media=loaded;master=(media.find(m=>m.name==='wrist')||media[0])?.video;if(!master)throw Error('No camera videos');master.onended=()=>{if(!transition&&$('auto').checked)move(1,true)};seek(s.start_frame);$('status').textContent=catalog.warning||'';transition=false;if(resume)await play();
 }catch(e){if(request===serial){transition=false;$('status').textContent=String(e)}}}
 function move(delta,resume){if(pending)return;let nextE=ei,nextS=si+delta;if(nextS>=catalog.episodes[nextE].subtasks.length){nextE++;nextS=0}else if(nextS<0){nextE--;if(nextE>=0)nextS=catalog.episodes[nextE].subtasks.length-1}if(nextE<0||nextE>=catalog.episodes.length){pause();$('status').textContent='End of dataset';return}ei=nextE;si=nextS;load(resume)}
@@ -147,6 +149,8 @@ class Viewer:
                         "This assumes preprocessing used ascending episode order." if legacy else "")
         self.episodes, self.videos, self.cached_videos = [], {}, {}
         self.track_data = {}
+        self.mask_infos = {}
+        self.cached_masks = {}
         self.recomputed = recompute_settings is not None
         data_tables = {}
         for position, report in reports:
@@ -173,7 +177,8 @@ class Viewer:
                                            "transition": value.get("transition_from_previous", {})}
                                      for cam, value in record.get("third_person", {}).items()},
                 })
-            self.track_data[ep] = {"clean_video": "heatmap" in report,
+            self.mask_infos[ep] = [r.get("pov", {}).get("gripper_filter", {}) for r in report.get("subtasks", [])]
+            self.track_data[ep] = {"debug_overlays": report.get("debug_overlays", False), "clean_video": "heatmap" in report,
                                    "sigma": heatmap.get("sigma", 40.0),
                                    "alpha": heatmap.get("alpha", 0.55), "stages": track_stages}
             cameras = []
@@ -227,6 +232,40 @@ class Viewer:
             self.warning += (" Raw source videos; subtask boundaries are recomputed from gripper values. No dataset changes are written."
                              if raw_source else " Preview boundaries were recomputed from gripper values. Point overlays still follow saved tracking stages; this preview does not regenerate tracks or modify the dataset.")
 
+    def mask_data(self, episode):
+        if episode in self.cached_masks:
+            return self.cached_masks[episode]
+        import base64
+        import numpy as np
+        result = []
+        seen = set()
+        for info in self.mask_infos.get(episode, []):
+            key = (info.get("mask_file"), tuple(info.get("window", [])))
+            if info.get("mask_file") and key in seen:
+                continue
+            seen.add(key)
+            item = {"status": info.get("status"), "window": info.get("window")}
+            if info.get("mask_file"):
+                try:
+                    name = f"point_tracks/{info['mask_file']}"
+                    if ".." in Path(name).parts or Path(name).is_absolute():
+                        raise ValueError("Unsafe mask path")
+                    if self.local:
+                        path = self.root / name
+                    else:
+                        from huggingface_hub import hf_hub_download
+                        path = Path(hf_hub_download(self.repo, name, repo_type="dataset", revision=self.revision))
+                    with np.load(path, allow_pickle=False) as archive:
+                        item.update(shape=archive["shape"].tolist(), frames=archive["frame_indices"].tolist(),
+                                    bits=base64.b64encode(archive["packed_masks"].tobytes()).decode("ascii"))
+                        if "valid_frames" in archive:
+                            item['valid'] = archive['valid_frames'].tolist()
+                except Exception as exc:
+                    item.update(status="needs_review", error=str(exc))
+            result.append(item)
+        self.cached_masks[episode] = result
+        return result
+
     def video(self, episode, camera):
         if (episode, camera) in self.cached_videos:
             return self.cached_videos[(episode, camera)]
@@ -264,7 +303,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.content(json.dumps(dict(repo=self.viewer.repo, warning=self.viewer.warning,
                                              episodes=self.viewer.episodes)).encode(), "application/json")
             elif match := re.fullmatch(r"/tracks/(\d+)", route):
-                data = self.viewer.track_data.get(int(match[1]), {"stages": []})
+                data = dict(self.viewer.track_data.get(int(match[1]), {"stages": []}))
+                data["masks"] = self.viewer.mask_data(int(match[1]))
                 self.content(json.dumps(data).encode(), "application/json")
             elif match := re.fullmatch(r"/video/(\d+)/(wrist|top|side)", route):
                 self.stream(self.viewer.video(int(match[1]), match[2]))

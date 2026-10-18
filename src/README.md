@@ -38,6 +38,9 @@ src/
   tracking, Molmo2 third-person goals, rendered heatmaps and optional Hub upload.
 - `collect_points.py`: interactive gripper point labeling.
 - `upload_labels.py`: upload the collected points and images to Hugging Face.
+- `combine_datasets.py`: bundle worker Hub datasets and join captions, Claude
+  annotations and grounding by source episode/node identity. See
+  [combining datasets](../docs/combine_datasets.md).
 
 Shared modules live under `data/utilities/`:
 
@@ -52,6 +55,8 @@ Shared modules live under `data/utilities/`:
   Claude aggregation, loaded from pinned source state data without video decoding.
 - `annotation_grounding.py`: load caption/aggregation outputs from local runs or
   multiple Hub repos and map their selected subtask bounds/text to grounded data.
+- `episode_gripper_masks.py`: full-episode POV SAM masks, initialization/recovery
+  prompts, validity sidecars and tail-window filtering using those masks.
 
 Commands and settings: [Preprocessing](../docs/preprocessing.md) and
 [Molmo gripper point data](../docs/molmo_gripper_point_data.md).

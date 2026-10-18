@@ -90,6 +90,103 @@ class GripperMaskWorker:
                     self.predictor.reset_state(state)
         return output
 
+    def propagate_episode(self, frames, real, initialize, refine, validate, *,
+                          max_recoveries=5, retry_frames=30, correction_frames=()):
+        """One POV video state; redetect only on initialization or invalid propagation."""
+        import torch
+        real = np.asarray(real, bool)
+        h, w = frames[0].shape[:2]
+        masks = np.zeros((len(frames), h, w), bool)
+        accepted = np.zeros(len(frames), bool)
+        events, cursor, automatic_attempts = [], 0, 0
+        corrections = set(correction_frames)
+        with tempfile.TemporaryDirectory(prefix='robot101-sam2-episode-') as directory:
+            for i, frame in enumerate(frames):
+                if frame.shape != (h, w, 3):
+                    raise ValueError('SAM episode resolution changed')
+                if not cv2.imwrite(str(Path(directory) / f'{i:06d}.jpg'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)):
+                    raise OSError('Could not write SAM episode input')
+            amp = torch.autocast('cuda', dtype=torch.bfloat16) if self.device.type == 'cuda' and torch.cuda.is_bf16_supported() else nullcontext()
+            with torch.inference_mode(), amp:
+                state = self.predictor.init_state(directory, offload_video_to_cpu=True, offload_state_to_cpu=True)
+                try:
+                    while cursor < len(frames):
+                        if not real[cursor]:
+                            events.append(dict(frame=cursor, status='needs_review', reason='missing_wrist_frame'))
+                            cursor += 1
+                            continue
+                        manual = cursor in corrections
+                        if not manual and automatic_attempts >= max_recoveries + 1:
+                            events.append(dict(frame=cursor, status='needs_review', reason='recovery_budget_exhausted'))
+                            # Still honor explicit later human corrections.
+                            later = [f for f in corrections if f > cursor and real[f]]
+                            cursor = min(later) if later else len(frames)
+                            continue
+                        if not manual:
+                            automatic_attempts += 1
+                        self.predictor.reset_state(state)
+                        attempt_start, seed = cursor, cursor
+                        try:
+                            seed, points, labels, manual = initialize(cursor)
+                            seed = int(seed)
+                            points = np.asarray(points, np.float32).reshape(-1, 2)
+                            labels = np.asarray(labels, np.int32)
+                            if (not cursor <= seed < len(frames) or not real[seed]
+                                    or labels.shape != (len(points),) or not np.isin(labels, [0, 1]).all()
+                                    or not (labels == 1).any()):
+                                raise ValueError('invalid_episode_seed_prompts')
+                            _, _, logits = self.predictor.add_new_points_or_box(
+                                state, frame_idx=seed, obj_id=1, points=points, labels=labels)
+                            provisional = (logits[0, 0] > 0).cpu().numpy()
+                            masks[seed] = provisional
+                            if not manual:
+                                points, labels = refine(seed, provisional, points, labels)
+                                points, labels = np.asarray(points, np.float32), np.asarray(labels, np.int32)
+                                _, _, logits = self.predictor.add_new_points_or_box(
+                                    state, frame_idx=seed, obj_id=1, points=points, labels=labels, clear_old_points=True)
+                            mask = (logits[0, 0] > 0).cpu().numpy()
+                            masks[seed] = mask
+                            reason = validate(seed, mask, None, None, points, labels)
+                            if reason:
+                                raise ValueError(reason)
+                            accepted[seed] = True
+                            if seed > attempt_start:
+                                events.append(dict(frame=attempt_start, end_frame=seed,
+                                    status='needs_review', reason='no_mask_before_valid_seed'))
+                            seed_area = previous_area = float(mask.mean())
+                            events.append(dict(frame=seed, requested_frame=attempt_start,
+                                status='initialized' if automatic_attempts <= 1 and not manual else 'reinitialized',
+                                manual=bool(manual), points_xy=points.tolist(), labels=labels.tolist()))
+                            failed_at = None
+                            for index, _, logits in self.predictor.propagate_in_video(state, start_frame_idx=seed):
+                                if index == seed:
+                                    continue
+                                if index in corrections:
+                                    failed_at = index
+                                    break
+                                mask = (logits[0, 0] > 0).cpu().numpy()
+                                masks[index] = mask
+                                reason = ('missing_wrist_frame' if not real[index] else
+                                          validate(index, mask, seed_area, previous_area, None, None))
+                                if reason:
+                                    events.append(dict(frame=int(index), status='needs_review', reason=reason))
+                                    failed_at = index
+                                    break
+                                accepted[index] = True
+                                previous_area = float(mask.mean())
+                            cursor = int(failed_at) if failed_at is not None else len(frames)
+                        except Exception as exc:
+                            events.append(dict(frame=int(seed), requested_frame=attempt_start,
+                                               status='needs_review', reason=str(exc)))
+                            # No valid mask: retry later, rather than calling Molmo every frame.
+                            cursor = max(attempt_start + 1, int(seed) + retry_frames)
+                            later = [f for f in corrections if attempt_start < f < cursor and real[f]]
+                            if later:
+                                cursor = min(later)
+                finally:
+                    self.predictor.reset_state(state)
+        return masks, accepted, events
+
 
 def filter_candidates(tracks, visible, masks, max_weight=2.0, radius_fraction=0.05, goal_tail_frames=5):
     """Return eligibility, observation weights and tracks filled from valid data.

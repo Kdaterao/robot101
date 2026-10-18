@@ -24,13 +24,19 @@ class DebugOverlayRenderer:
     def __init__(self, records, sidecar_root):
         self.records = records
         self.masks = []
+        seen = set()
         for record in records:
             info = record["pov"].get("gripper_filter", {})
+            identity = (info.get("mask_file"), tuple(info.get("window", [])))
+            if info.get("mask_file") and identity in seen:
+                continue
+            seen.add(identity)
             packed = None
             if info.get("status") == "ok" and info.get("mask_file"):
                 with np.load(Path(sidecar_root) / info["mask_file"], allow_pickle=False) as archive:
                     packed = (archive["packed_masks"].copy(), archive["shape"].copy(),
-                              {int(frame): i for i, frame in enumerate(archive["frame_indices"])})
+                              {int(frame): i for i, frame in enumerate(archive["frame_indices"])},
+                              archive["valid_frames"].copy() if "valid_frames" in archive else None)
             self.masks.append((info, packed))
 
     @staticmethod
@@ -62,7 +68,7 @@ class DebugOverlayRenderer:
                 if packed is None:
                     status = "mask: REVIEW required"
                     continue
-                bits, shape, indices = packed
+                bits, shape, indices, validity = packed
                 if frame not in indices:
                     status = "mask: REVIEW required"
                     continue
@@ -71,7 +77,7 @@ class DebugOverlayRenderer:
                     status = "mask: REVIEW required"
                     continue
                 image[mask] = (0.6*image[mask]+0.4*np.array([255, 0, 255])).astype(np.uint8)
-                status = "mask: SAM2"
+                status = "mask: SAM2" if validity is None or validity[indices[frame]] else "mask: REJECTED / REVIEW"
             if current["pov"].get("gripper_filter", {}).get("status") == "disabled":
                 status = "mask: disabled"
             result = current["pov"]

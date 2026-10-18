@@ -147,15 +147,37 @@ and gripper stage options.
 
 ### SAM mask spill checks
 
-By default, Molmo searches the first three valid frames of each clustering window
+By default, **POV-only** SAM 2 runs across the whole episode. Molmo initializes
+the mask at the beginning, then runs again only when the mask is empty, excessive,
+grows suspiciously or propagation otherwise fails validation. Annotation and
+grounding subtask boundaries do not reset SAM or trigger extra Molmo calls.
+Third-person grounding and its separate Molmo calls are unchanged.
+
+Molmo searches the first three valid frames at initialization/recovery
 for positive gripper-body/finger points (`--sam2-seed-search-frames 3`). The first
 nonempty detection seeds SAM. SAM generates a provisional mask on that seed frame;
 only then does Molmo see a copied frame with the provisional mask in magenta and
 positive anchors in green, and request negative points inside nearby/held non-robot
 objects. The prompt explicitly states that the provisional mask can be wrong.
 SAM refines the same seed using all positive/negative points before propagating
-through the clustering window. Negative prompting is no longer batched alongside
+through the episode. Negative prompting is no longer batched alongside
 the initial gripper detections. Human correction prompts bypass automatic refinement.
+Clustering/filter statistics still use only each grounding interval's tail window
+and extension, sliced from the shared episode masks.
+
+`--sam2-max-recoveries 5` permits five automatic recoveries after initialization.
+If reinitialization fails, `--sam2-recovery-retry-frames 30` prevents trying Molmo
+on every subsequent frame. Unresolved frames require human correction; missing
+camera frames are never filled with a fabricated mask. These checks cannot
+detect every semantic segmentation mistake. Review full-episode previews before
+large runs; full decoding/propagation adds CPU memory and compute.
+
+Full masks, per-frame validity and recovery events are saved in
+`point_tracks/gripper_masks/epNNNNNN_full.npz` and its JSON sidecar. Both viewers
+can show full-episode masks; rejected masks are marked for review. Human recovery
+items use keys like `10:frame:123` with the existing correction tool. Corrected
+frames reinitialize SAM at that exact time. `--no-sam2-full-episode` restores the
+earlier window-based path. Use a fresh destination when changing this policy.
 
 The provisional seed mask/preview is saved for inspection. If the negative request
 fails, only that provisional frame is available and is labeled for review; it is
