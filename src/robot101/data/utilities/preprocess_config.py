@@ -74,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sam2-model", default="facebook/sam2.1-hiera-tiny")
     p.add_argument("--sam2-negative-prompts", action=argparse.BooleanOptionalAction, default=True,
                    help="Ask Molmo for nearby non-gripper object points as negative SAM prompts")
+    p.add_argument("--sam2-seed-search-frames", type=int, default=3,
+                   help="Search the first N valid clustering frames for gripper-body prompts before mask refinement")
     p.add_argument("--sam2-require-negative-points", action=argparse.BooleanOptionalAction, default=True,
                    help="Queue automatic masks for correction if object negatives are unavailable")
     p.add_argument("--sam2-max-area-fraction", type=float, default=0.8)

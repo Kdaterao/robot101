@@ -9,7 +9,7 @@ from robot101.perception.gripper_masks import BODY_PROMPT, NEGATIVE_PROMPT, vali
 
 def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subtask,
                            corrections, max_weight, radius_fraction, goal_tail_frames, prompt_result=None,
-                           negative_result=None, negative_prompts=True, require_negatives=True,
+                           prompt_candidates=None, seed_search_frames=3, negative_prompts=True, require_negatives=True,
                            max_area_fraction=0.8, max_growth_ratio=2.0, growth_area_fraction=0.02):
     start = int(entry['tail_start'])
     length = entry['tracks'].shape[1]
@@ -44,31 +44,80 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
             labels = correction.get('labels', [1]*len(points))
             source = 'human_mask_prompt'
         else:
-            points = valid_points(prompt_result if prompt_result is not None else molmo.ground(clip[seed], BODY_PROMPT), w, h)
+            candidates = prompt_candidates
+            if candidates is None:
+                candidates = [(start + int(index), prompt_result if prompt_result is not None and index == seed
+                               else molmo.ground(clip[int(index)], BODY_PROMPT))
+                              for index in valid[:seed_search_frames]]
+            for frame_index, raw in candidates:
+                index = int(frame_index) - start
+                if not 0 <= index < length or not real[index]:
+                    continue
+                try:
+                    candidate = valid_points(raw, w, h)
+                except (ValueError, TypeError):
+                    continue
+                if len(candidate):
+                    seed, points = index, candidate
+                    break
             labels = [1]*len(points)
-            if negative_prompts:
-                raw = negative_result if negative_result is not None else molmo.ground(clip[seed], NEGATIVE_PROMPT)
-                if raw.get('error'):
-                    raise ValueError(f"negative_prompt_failed:{raw['error']}")
-                negatives = valid_points(raw, w, h)
-                metadata['negative_prompt'] = NEGATIVE_PROMPT
-                metadata['negative_points_xy'] = negatives.tolist()
-                if len(negatives) and len(points) and (np.linalg.norm(
-                        negatives[:, None] - points[None], axis=-1) <= 3).any():
-                    raise ValueError('positive_negative_prompts_conflict')
-                if not len(negatives) and require_negatives:
-                    raise ValueError('object_negative_points_unavailable')
-                labels += [0]*len(negatives)
-                points = np.concatenate([points, negatives])
-                source = 'molmo_body_and_object_prompts'
         if not len(points):
             raise ValueError('no_visible_gripper_body_points')
+
+        def refine(provisional):
+            nonlocal points, labels, source
+            if provisional.shape != (h, w) or not provisional.any():
+                raise ValueError('invalid_provisional_gripper_mask')
+            preview = clip[seed].copy()
+            preview[provisional] = (0.65*preview[provisional] + 0.35*np.array([255, 0, 255])).astype(np.uint8)
+            for point in points:
+                cv2.circle(preview, tuple(np.rint(point).astype(int)), 4, (0, 255, 0), -1)
+            directory = root / 'gripper_masks'
+            directory.mkdir(parents=True, exist_ok=True)
+            provisional_path = directory / f'{stem}_provisional.npz'
+            np.savez_compressed(provisional_path, packed_masks=np.packbits(provisional[None], axis=-1),
+                                shape=np.asarray((1, h, w)), frame_indices=np.asarray([start+seed]))
+            metadata.update(mask_file=provisional_path.relative_to(root).as_posix(),
+                            mask_prediction_stage='provisional')
+            preview_path = directory / f'{stem}_provisional.jpg'
+            cv2.imwrite(str(preview_path), cv2.cvtColor(preview, cv2.COLOR_RGB2BGR))
+            metadata['provisional_preview_file'] = preview_path.relative_to(root).as_posix()
+            metadata['prompt_sequence'] = 'positive_detection_then_seed_mask_then_object_negatives_then_propagation'
+            started = perf_counter()
+            raw = molmo.ground(preview, NEGATIVE_PROMPT)
+            metadata['negative_prompt_seconds'] = perf_counter()-started
+            if raw.get('error'):
+                raise ValueError(f"negative_prompt_failed:{raw['error']}")
+            negatives = valid_points(raw, w, h)
+            metadata['negative_prompt'] = NEGATIVE_PROMPT
+            metadata['negative_points_xy'] = negatives.tolist()
+            if len(negatives) and (np.linalg.norm(negatives[:, None] - points[None], axis=-1) <= 3).any():
+                raise ValueError('positive_negative_prompts_conflict')
+            if not len(negatives) and require_negatives:
+                raise ValueError('object_negative_points_unavailable')
+            labels += [0]*len(negatives)
+            points = np.concatenate([points, negatives])
+            source = 'molmo_sequential_body_mask_object_prompts'
+            return points, labels
+
         started = perf_counter()
         print(f"  SAM 2 ep{episode}/stage{subtask}: {length} clustering frames", flush=True)
-        masks = sam.propagate(clip, seed, points, labels)
+        if correction is None and negative_prompts:
+            masks = sam.propagate(clip, seed, points, labels, refine_prompt=refine)
+        else:
+            masks = sam.propagate(clip, seed, points, labels)
         metadata['mask_seconds'] = perf_counter()-started
         if masks.shape != (length, h, w):
             raise ValueError('invalid_mask_shape')
+        # Preserve predictions for inspection even when validation rejects them.
+        # Saving a rejected mask never makes it eligible for clustering.
+        directory = root / 'gripper_masks'
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f'{stem}.npz'
+        np.savez_compressed(path, packed_masks=np.packbits(masks, axis=-1),
+                            shape=np.asarray(masks.shape), frame_indices=np.arange(start, start+length))
+        metadata['mask_file'] = path.relative_to(root).as_posix()
+        metadata['mask_prediction_stage'] = 'refined_propagated'
         area = masks.mean(axis=(1, 2))
         # Reject empty or near-full-frame segmentations; these checks do not
         # assert semantic correctness. Human inspection is still necessary.
@@ -99,11 +148,6 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
             entry['tracks'], entry['visible'], masks, max_weight, radius_fraction, goal_tail_frames)
         entry.update(tracks=filtered, visible=visibility, observation_weights=weights,
                      eligible=eligible, endpoints=endpoints)
-        directory = root / 'gripper_masks'
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f'{stem}.npz'
-        np.savez_compressed(path, packed_masks=np.packbits(masks, axis=-1),
-                            shape=np.asarray(masks.shape), frame_indices=np.arange(start, start+length))
         previews = []
         for t in dict.fromkeys([seed, length-1]):
             preview = clip[t].copy()

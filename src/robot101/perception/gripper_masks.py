@@ -13,6 +13,8 @@ BODY_PROMPT = (
     'Do not point to the empty space between the jaws or to the held object.'
 )
 NEGATIVE_PROMPT = (
+    'Green dots mark detected solid gripper parts. The magenta overlay is a PROVISIONAL '
+    'gripper mask and may incorrectly include an object; it is not ground truth. '
     'Point inside visible non-robot objects touching or immediately beside the robot gripper, '
     'including any object held between the fingers. These are objects to EXCLUDE from a gripper mask. '
     'Do not point to the robot body, fingers, empty space or background. '
@@ -42,7 +44,7 @@ class GripperMaskWorker:
         self.predictor = SAM2VideoPredictor.from_pretrained(model_id, device=self.device, apply_postprocessing=False)
         self.predictor.eval()
 
-    def propagate(self, frames, seed_frame, points, labels=None):
+    def propagate(self, frames, seed_frame, points, labels=None, refine_prompt=None):
         import torch
         points = np.asarray(points, np.float32).reshape(-1, 2)
         labels = np.ones(len(points), np.int32) if labels is None else np.asarray(labels, np.int32)
@@ -64,6 +66,19 @@ class GripperMaskWorker:
                 try:
                     _, _, logits = self.predictor.add_new_points_or_box(
                         state, frame_idx=seed_frame, obj_id=1, points=points, labels=labels)
+                    if refine_prompt is not None:
+                        # Request object exclusions only after the positive mask exists.
+                        provisional = (logits[0, 0] > 0).cpu().numpy()
+                        refined_points, refined_labels = refine_prompt(provisional)
+                        refined_points = np.asarray(refined_points, np.float32).reshape(-1, 2)
+                        refined_labels = np.asarray(refined_labels, np.int32)
+                        if (refined_labels.shape != (len(refined_points),)
+                                or not np.isin(refined_labels, [0, 1]).all()
+                                or not (refined_labels == 1).any()):
+                            raise ValueError('Invalid refined SAM prompts')
+                        _, _, logits = self.predictor.add_new_points_or_box(
+                            state, frame_idx=seed_frame, obj_id=1,
+                            points=refined_points, labels=refined_labels, clear_old_points=True)
                     output[seed_frame] = (logits[0, 0] > 0).cpu().numpy()
                     for reverse in (False, True):
                         if reverse and seed_frame == 0:

@@ -147,8 +147,21 @@ and gripper stage options.
 
 ### SAM mask spill checks
 
-By default, Molmo supplies positive gripper-body/finger points and a separate
-request supplies negative points inside visible nearby/held non-robot objects.
+By default, Molmo searches the first three valid frames of each clustering window
+for positive gripper-body/finger points (`--sam2-seed-search-frames 3`). The first
+nonempty detection seeds SAM. SAM generates a provisional mask on that seed frame;
+only then does Molmo see a copied frame with the provisional mask in magenta and
+positive anchors in green, and request negative points inside nearby/held non-robot
+objects. The prompt explicitly states that the provisional mask can be wrong.
+SAM refines the same seed using all positive/negative points before propagating
+through the clustering window. Negative prompting is no longer batched alongside
+the initial gripper detections. Human correction prompts bypass automatic refinement.
+
+The provisional seed mask/preview is saved for inspection. If the negative request
+fails, only that provisional frame is available and is labeled for review; it is
+never approved for point culling. Use a fresh output destination after changing
+to this sequential policy; older outputs cannot be resumed into the new policy.
+
 SAM must include positive prompts and exclude negative prompts on that exact
 prompt frame. Near-coincident positive/negative points require review. Negative
 coordinates are not treated as stationary constraints across other video frames.

@@ -41,7 +41,7 @@ from robot101.data.utilities.episode_helpers import (
     _save_progress,
 )
 from robot101.perception.molmo2 import Molmo2Worker
-from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT, NEGATIVE_PROMPT
+from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT
 from robot101.data.utilities.gripper_filtering import prepare_gripper_filter
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
@@ -583,6 +583,8 @@ def main() -> None:
         raise SystemExit("Gripper change fraction must be in (0, 1]; absolute change must be finite and nonnegative")
     if args.min_stage_frames < 1 or args.max_stages < 1:
         raise SystemExit("Stage frame/count limits must be positive")
+    if args.sam2_seed_search_frames < 1:
+        raise SystemExit("--sam2-seed-search-frames must be positive")
     if (not 0 < args.sam2_max_area_fraction <= 1
             or not np.isfinite(args.sam2_max_growth_ratio) or args.sam2_max_growth_ratio <= 1
             or not 0 <= args.sam2_growth_area_fraction <= 1):
@@ -622,7 +624,7 @@ def main() -> None:
                       if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
         annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
     goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1",
-                   "pov_mask_policy": "object_negatives_growth_review_v1",
+                   "pov_mask_policy": "sequential_body_mask_object_negatives_v2",
                    "mask_settings": {key: value for key, value in vars(args).items()
                                      if key.startswith("sam2_") and key != "sam2_corrections"},
                    "mask_corrections_fingerprint": fingerprint(json.loads(args.sam2_corrections.read_text()))
@@ -856,7 +858,6 @@ def main() -> None:
                                    batch_size=args.decode_batch_size, backend=args.video_backend)
             episode_cache = []
             body_results = {}
-            negative_results = {}
             if sam is not None and hasattr(molmo, "ground_batch"):
                 requests, request_stages = [], []
                 for si, stage in enumerate(stages):
@@ -864,23 +865,21 @@ def main() -> None:
                         continue
                     lo, hi = _stage_cluster_bounds(stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames)
                     real = np.flatnonzero(data["masks"][CAMERA_WRIST][lo:hi+1])
-                    if len(real):
-                        requests.append((data["frames"][CAMERA_WRIST][lo+int(real[0])], BODY_PROMPT))
-                        request_stages.append((si, "body"))
-                        if args.sam2_negative_prompts:
-                            requests.append((data["frames"][CAMERA_WRIST][lo+int(real[0])], NEGATIVE_PROMPT))
-                            request_stages.append((si, "negative"))
+                    for index in real[:args.sam2_seed_search_frames]:
+                        frame_index = lo + int(index)
+                        requests.append((data["frames"][CAMERA_WRIST][frame_index], BODY_PROMPT))
+                        request_stages.append((si, frame_index))
                 if requests:
                     try:
                         results = molmo.ground_batch(requests)
                         if len(results) != len(requests):
                             raise ValueError("Body-prompt batch length mismatch")
-                        mapped = dict(zip(request_stages, results))
-                        body_results = {si: value for (si, kind), value in mapped.items() if kind == "body"}
-                        negative_results = {si: value for (si, kind), value in mapped.items() if kind == "negative"}
+                        for (si, frame_index), result in zip(request_stages, results):
+                            body_results.setdefault(si, []).append((frame_index, result))
                     except Exception as exc:
-                        body_results = {si: {"error": str(exc)} for si, _ in request_stages}
-                        negative_results = body_results.copy()
+                        body_results = {}
+                        for si, frame_index in request_stages:
+                            body_results.setdefault(si, []).append((frame_index, {"error": str(exc)}))
             for si, stage in enumerate(stages):
                 _, window_end = _stage_cluster_bounds(
                     stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
@@ -895,7 +894,7 @@ def main() -> None:
                         entry, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST],
                         molmo, sam, bank_root, ep_idx, si, corrections,
                         args.gripper_proximity_weight, args.gripper_proximity_radius, args.goal_tail_frames,
-                        prompt_result=body_results.get(si), negative_result=negative_results.get(si),
+                        prompt_candidates=body_results.get(si), seed_search_frames=args.sam2_seed_search_frames,
                         negative_prompts=args.sam2_negative_prompts,
                         require_negatives=args.sam2_require_negative_points,
                         max_area_fraction=args.sam2_max_area_fraction,
