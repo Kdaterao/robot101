@@ -1,8 +1,96 @@
 # Build the grounded robot training dataset
 
-This pipeline converts SO-101 episodes into a LeRobot dataset with gripper-based
-subtasks, wrist-camera point clusters, and third-person point heatmaps grounded
-by Molmo2 and tracked by TAPIR.
+This pipeline converts SO-101 episodes into a LeRobot dataset with wrist-camera
+point clusters and third-person grounding from Molmo2/TAPIR. Normal output videos
+are clean; points and masks are sidecars. Subtasks come from gripper events for
+raw inputs, or the existing selected caption/aggregation cut for annotation inputs.
+
+## Ground an annotated dataset
+
+Annotation Hub datasets contain JSON/text artifacts and references to source
+LeRobot videos, rather than rewritten source videos. Use the annotation adapter
+instead of passing an annotation repository as `--src-repo-id`:
+
+```bash
+python -m robot101.data.preprocess \
+  --annotation-repo-ids kdaterao/so101_annotations_plm3b_verified_spread5 \
+  --episodes 0 \
+  --dst-repo-id kdaterao/so101_annotated_grounded_test \
+  --push-to-hub
+```
+
+To ground your **local Claude output**, including its rewritten actions:
+
+```bash
+python -m robot101.data.preprocess \
+  --annotation-input-dirs outputs/aggregated_plm3b_spread5_stillness_001 \
+  --episodes 0 \
+  --dst-repo-id kdaterao/so101_aggregated_grounded_test \
+  --push-to-hub
+```
+
+Run grounding in the GPU preprocessing environment described below; the viewer
+environment used for Claude may not contain Molmo2/SAM/TAPIR dependencies.
+
+The adapter:
+
+- Loads the exact source dataset **revision and episode IDs** referenced by the
+  annotations, in a revision-isolated cache. Later source releases may trim or
+  reindex episodes, so switching to the current source revision is not allowed.
+- Uses only `selected_node_ids`. Half-open annotation bounds `[start,end)` become
+  inclusive tracking stages `[start,end-1]`, with no new gripper-based splitting.
+  Gaps, overlaps, incomplete coverage, source FPS/frame-count/timestamp mismatch,
+  or too many stages are errors; boundaries are never silently merged or replaced.
+- Uses each subtask's `aggregation.brief_action` when aggregation is available,
+  otherwise its completed original caption. This text supplies the destination
+  frame `task` and the noun extraction for that subtask. Structured manipulated
+  object/destination fields are also prioritized as third-person candidates.
+- Preserves the POV tail window, next-stage extension, SAM exclusion/weighting,
+  backward TAPIR tracking, transition overlap and exact-endpoint stationary
+  third-person fallback behavior. Annotated stages use local point selection:
+  **cross-demo funneling by numeric stage index is disabled**, because different
+  episodes need not contain matching actions at the same stage number. The shared
+  appearance-query bank remains; begin validation with one or a few episodes.
+  If no usable POV queries exist, annotated runs continue third-person grounding
+  and record the missing POV points explicitly.
+- Saves source node IDs, original annotation bounds/text provenance and review
+  status in `point_tracks/epNNNNNN.json`, copies the annotation episode to
+  `point_tracks/annotations/epNNNNNN.json`, and records input fingerprints in
+  `meta/grounding_annotations.json`. These sidecars are uploaded with the output.
+  `annotation_review_required` stays true for unreviewed/truncated annotations;
+  successful tracking does not validate the original caption.
+
+Defaults: `--annotation-stage auto` prefers `aggregation/` when it exists on a
+Hub repo, otherwise `captioning/`. For local inputs, point to the run directory
+containing `episodes/`. `--annotation-text auto` prefers aggregated brief actions
+and explicitly records any fallback to an original caption. Choose `caption`,
+`brief_action`, `detailed_action`, `brief_caption` or `detailed_caption` to require
+a specific text field. An explicit unavailable field is an error. Source task
+text is not used as a hidden replacement for a missing annotation.
+
+Multiple disjoint VM outputs are supported:
+
+```bash
+python -m robot101.data.preprocess \
+  --annotation-repo-ids YOUR_USER/annotations_vm1 YOUR_USER/annotations_vm2 \
+  --dst-repo-id YOUR_USER/combined_grounded \
+  --push-to-hub
+```
+
+The same works with multiple paths after `--annotation-input-dirs`. All inputs
+must refer to one raw source dataset/revision; duplicate episode IDs are rejected.
+Omit `--episodes` to process every available annotation episode, or supply the
+same inclusive comma-separated/stepped syntax as annotation generation. Raw mode
+still defaults to episode 0. For large runs, process manageable episode groups;
+this adapter does not benchmark or remove the shared query bank's memory cost.
+
+Use `--dry-run` to validate source metadata and print the annotation stages
+without loading models or writing a dataset (source metadata/state parquet is
+downloaded as needed, but videos are not). Use a fresh destination for annotation-based output. `--resume`
+rejects changing annotation sources, revisions, text mode, selection or boundaries,
+and rejects mixing raw gripper-stage output with annotated output.
+
+## Environment and raw-input workflow
 
 On an Ubuntu GPU VM, install the preprocessing environment, authenticate to
 Hugging Face, and download the TAPIR checkpoint once:

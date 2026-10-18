@@ -5,6 +5,7 @@ from __future__ import annotations
 from robot101.paths import REPO_ROOT
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -47,6 +48,7 @@ def _mask_key(name: str) -> str:
 
 
 def _parse_episodes(raw: str | None) -> list[int] | None:
+    """Union of IDs and inclusive comma-separated start-end[:step]/start:end[:step]."""
     if not raw:
         return None
     out: list[int] = []
@@ -54,16 +56,28 @@ def _parse_episodes(raw: str | None) -> list[int] | None:
         part = part.strip()
         if not part:
             continue
-        if "-" in part:
-            bounds, separator, raw_step = part.partition(":")
-            a, b = bounds.split("-", 1)
-            step = int(raw_step) if separator else 1
-            if step < 1:
-                raise ValueError(f"Episode range step must be positive: {part!r}")
-            out.extend(range(int(a), int(b) + 1, step))
-        else:
-            out.append(int(part))
+        match = re.fullmatch(r"(\d+)(?:\s*[-:]\s*(\d+)(?:\s*:\s*(\d+))?)?", part)
+        if not match:
+            raise ValueError(f"Invalid episode selection {part!r}; use ID, start-end:step or start:end:step")
+        a, b, raw_step = match.groups()
+        a = int(a)
+        if b is None:
+            out.append(a)
+            continue
+        b, step = int(b), int(raw_step or 1)
+        if step < 1:
+            raise ValueError(f"Episode range step must be positive: {part!r}")
+        if b < a:
+            raise ValueError(f"Episode range end must be >= start: {part!r}")
+        out.extend(range(a, b + 1, step))
     return sorted(set(out))
+
+
+def shard_episodes(episodes, num_shards=1, shard_index=0):
+    """Deterministic round-robin split of sorted unique episode IDs."""
+    if num_shards < 1 or not 0 <= shard_index < num_shards:
+        raise ValueError("--num-shards must be positive and --shard-index must be in [0, num-shards)")
+    return sorted(set(episodes))[shard_index::num_shards]
 
 
 def _as_numpy(x) -> np.ndarray:

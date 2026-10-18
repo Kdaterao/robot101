@@ -11,8 +11,20 @@ DEFAULT_MOLMO = "allenai/Molmo2-4B"
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--src-repo-id", default=DEFAULT_SRC)
+    p.add_argument("--src-revision", help="Pin raw source revision; annotation input supplies its exact source SHA")
+    annotations = p.add_mutually_exclusive_group()
+    annotations.add_argument("--annotation-repo-ids", nargs="+",
+                   help="Annotation/aggregation Hub datasets, including disjoint VM worker outputs")
+    annotations.add_argument("--annotation-input-dirs", nargs="+", type=Path,
+                   help="Local annotation/aggregation output directories")
+    p.add_argument("--annotation-revision", default="main")
+    p.add_argument("--annotation-stage", choices=["auto", "captioning", "aggregation"], default="auto")
+    p.add_argument("--annotation-text", default="auto",
+                   choices=["auto", "caption", "brief_action", "detailed_action", "brief_caption", "detailed_caption"],
+                   help="Per-subtask task text; auto prefers aggregated brief_action, otherwise completed caption")
     p.add_argument("--dst-repo-id", default=DEFAULT_DST)
-    p.add_argument("--episodes", default="0", help="Episode selection (default: 0), e.g. 0-9, 0-25:5, or 0,1,5")
+    p.add_argument("--episodes", default=None,
+                   help="Inclusive comma-separated ranges; default: all annotation episodes, or raw episode 0")
     p.add_argument("--molmo-model", default=DEFAULT_MOLMO, help="Base HF model ID or local Transformers checkpoint")
     p.add_argument("--molmo-backend", choices=["molmo2", "molmopoint"], default="molmo2")
     p.add_argument("--molmo-connector", type=Path, help="Local trusted so101_connector.pt; overrides Hub download")

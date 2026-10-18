@@ -44,22 +44,15 @@ from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT
 from robot101.data.utilities.gripper_filtering import prepare_gripper_filter
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
+from robot101.data.utilities.annotation_tree import atomic_json, fingerprint
+from robot101.data.utilities.annotation_grounding import load_annotation_grounding, check_grounding_annotations
 from robot101.data.utilities.debug_overlays import DebugOverlayRenderer, check_output_mode, write_output_mode
 from robot101.data.utilities.validation import (EpisodeShapeError, validate_episode_shapes,
                                  record_skipped_episode, install_statistics_validation)
-from robot101.perception.motion_plan import (
+from robot101.data.utilities.stages import (
     Stage,
     events_from_gripper_thresholds,
-    select_stage_active,
     stages_from_events,
-)
-from robot101.perception.tracking import (
-    BootsTAPIR,
-    DEFAULT_CHECKPOINT,
-    concat_query_features,
-    points_heatmap,
-    sample_query_points,
-    track_tail_endpoint,
 )
 
 LEROBOT_SRC = REPO_ROOT / "lerobot" / "src"
@@ -76,7 +69,8 @@ def _task_text(tasks: list[str]) -> str:
     return Counter(nonempty).most_common(1)[0][0] if nonempty else ""
 
 
-def _load_source_episode(LeRobotDataset, repo_id: str, ep_idx: int, root: Path, video_backend: str):
+def _load_source_episode(LeRobotDataset, repo_id: str, ep_idx: int, root: Path, video_backend: str,
+                         revision=None, download_videos=True):
     """Load one episode, syncing its referenced shards when the local cache is partial.
 
     LeRobot can have valid episode metadata locally while the parquet shard for
@@ -89,6 +83,8 @@ def _load_source_episode(LeRobotDataset, repo_id: str, ep_idx: int, root: Path, 
         "episodes": [ep_idx],
         "root": root,
         "video_backend": video_backend,
+        "revision": revision,
+        "download_videos": download_videos,
     }
     try:
         return LeRobotDataset(repo_id, **kwargs)
@@ -214,7 +210,7 @@ def _stage_cache_entry(
     window_end = max(stage.end, min(int(window_end), len(frames) - 1))
     clip = frames[tail_start : window_end + 1]
     real = masks[tail_start : window_end + 1]
-    if len(clip) < 1 or not bool(real.any()):
+    if num_queries == 0 or len(clip) < 1 or not bool(real.any()):
         return {
             "tracks": np.zeros((num_queries, max(1, len(clip)), 2), dtype=np.float32),
             "visible": np.zeros((num_queries, max(1, len(clip))), dtype=bool),
@@ -237,11 +233,13 @@ def _select_pov_points(
     stage_lists: list[list[Stage]],
     args: argparse.Namespace,
     device,
+    *, cross_demo=True,
 ) -> tuple[dict[tuple[int, int], np.ndarray], int]:
     """Choose shared candidate ids per aligned stage; local-select excess stages."""
+    from robot101.perception.motion_plan import select_stage_active
     counts = [len(stages) for stages in stage_lists]
-    n_aligned = min(counts, default=0)
-    if len(set(counts)) > 1:
+    n_aligned = min(counts, default=0) if cross_demo else 0
+    if cross_demo and len(set(counts)) > 1:
         print(
             f"WARNING: episode stage counts differ {counts}; clustering the shared "
             f"prefix of {n_aligned} stages, then selecting extra stages per episode."
@@ -564,11 +562,32 @@ def main() -> None:
     if args.min_stage_frames < 1 or args.max_stages < 1:
         raise SystemExit("Stage frame/count limits must be positive")
     LeRobotDataset, LeRobotDatasetMetadata, DEFAULT_FEATURES, HF_LEROBOT_HOME = _load_lerobot()
-    ep_filter = _parse_episodes(args.episodes)
-    src_root = HF_LEROBOT_HOME / args.src_repo_id
-    src_meta = LeRobotDatasetMetadata(args.src_repo_id, root=src_root)
+    try:
+        ep_filter = _parse_episodes(args.episodes)
+        annotation_input = (load_annotation_grounding(args, ep_filter)
+                            if args.annotation_repo_ids or args.annotation_input_dirs else None)
+    except (ValueError, OSError, KeyError) as exc:
+        raise SystemExit(f"Annotation input: {exc}") from exc
+    if annotation_input:
+        oversized = [ep for ep, stages in annotation_input.stages.items() if len(stages) > args.max_stages]
+        if oversized:
+            raise SystemExit(f"Annotation stage counts exceed --max-stages for {oversized}; raise the limit to preserve boundaries")
+        if args.src_revision and args.src_revision != annotation_input.source_revision:
+            raise SystemExit("--src-revision conflicts with the annotations' pinned source revision")
+        args.src_repo_id, args.src_revision = annotation_input.source_repo_id, annotation_input.source_revision
+        episode_ids = sorted(annotation_input.records)
+        src_root = HF_LEROBOT_HOME / "robot101_annotation_grounding" / fingerprint(
+            dict(repo=args.src_repo_id, revision=args.src_revision))[:24]
+    else:
+        episode_ids = ep_filter if ep_filter is not None else [0]
+        src_root = (HF_LEROBOT_HOME / args.src_repo_id if args.src_revision is None else
+                    HF_LEROBOT_HOME / "robot101_pinned_grounding" / fingerprint(
+                        dict(repo=args.src_repo_id, revision=args.src_revision))[:24])
+    src_meta = LeRobotDatasetMetadata(args.src_repo_id, root=src_root, revision=args.src_revision)
     fps = float(src_meta.fps)
-    episode_ids = ep_filter if ep_filter is not None else list(range(int(src_meta.total_episodes)))
+    if not episode_ids or any(i < 0 or i >= int(src_meta.total_episodes) for i in episode_ids):
+        raise SystemExit("Selected source episode IDs are empty or out of range")
+    annotation_manifest = annotation_input.manifest() if annotation_input else None
     print(f"Source episodes={len(episode_ids)} fps={fps}")
     cameras = [CAMERA_WRIST, *CAMERAS_3P]
     progress_path = HF_LEROBOT_HOME / args.dst_repo_id / "_preprocess_done.json"
@@ -579,6 +598,7 @@ def main() -> None:
     if not args.dry_run:
         try:
             check_output_mode(dst_root, args.debug_overlays)
+            check_grounding_annotations(dst_root, annotation_manifest)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         features = _clone_features(dict(src_meta.features), DEFAULT_FEATURES)
@@ -604,11 +624,14 @@ def main() -> None:
             )
         install_statistics_validation(dst.meta.features)
         write_output_mode(dst_root, args.debug_overlays)
+        if annotation_manifest:
+            atomic_json(dst_root / "meta" / "grounding_annotations.json", annotation_manifest)
 
     if args.dry_run:
         for ep_idx in episode_ids:
             source = _load_source_episode(
-                LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+                LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend,
+                revision=args.src_revision, download_videos=False
             )
             try:
                 data = load_episode_metadata(source, cameras)
@@ -616,16 +639,21 @@ def main() -> None:
             except EpisodeShapeError as exc:
                 print(f"[skip ep {ep_idx}] metadata shape: {exc}", flush=True)
                 continue
-            grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
-            events = events_from_gripper_thresholds(
-                grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
-                min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
-                vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
-                min_change_frac=args.gripper_min_change_frac if args.gripper_event_mode == "movement" else None,
-                min_change_abs=args.gripper_min_change_abs,
-            )
-            stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
-            print(f"episode {ep_idx}: {len(events)} gripper events, stages=" + ", ".join(f"[{s.start},{s.end}]" for s in stages))
+            if annotation_input:
+                stages = annotation_input.stage_list(ep_idx, data, fps, args.max_stages)
+                events = []
+            else:
+                grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
+                events = events_from_gripper_thresholds(
+                    grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
+                    min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
+                    vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
+                    min_change_frac=args.gripper_min_change_frac if args.gripper_event_mode == "movement" else None,
+                    min_change_abs=args.gripper_min_change_abs,
+                )
+                stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
+            origin = "annotation selected cut" if annotation_input else f"{len(events)} gripper events"
+            print(f"episode {ep_idx}: {origin}, stages=" + ", ".join(f"[{s.start},{s.end}]" for s in stages))
         return
 
     try:
@@ -636,6 +664,9 @@ def main() -> None:
     except OSError as exc:
         raise SystemExit(f"spaCy model {args.spacy_model!r} not installed. Run: python -m spacy download {args.spacy_model}") from exc
 
+    from robot101.perception.tracking import (
+        BootsTAPIR, concat_query_features, points_heatmap, sample_query_points, track_tail_endpoint,
+    )
     if args.tapir_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -674,20 +705,24 @@ def main() -> None:
     for epi, ep_idx in enumerate(episode_ids):
         print(f"[query bank] episode {ep_idx} ({epi + 1}/{len(episode_ids)})", flush=True)
         source = _load_source_episode(
-            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend, revision=args.src_revision
         )
         data = None
         try:
             data = load_episode_metadata(source, cameras)
-            grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
-            events = events_from_gripper_thresholds(
-                grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
-                min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
-                vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
-                min_change_frac=args.gripper_min_change_frac if args.gripper_event_mode == "movement" else None,
-                min_change_abs=args.gripper_min_change_abs,
-            )
-            stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
+            if annotation_input:
+                stages = annotation_input.stage_list(ep_idx, data, fps, args.max_stages)
+                events = []
+            else:
+                grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
+                events = events_from_gripper_thresholds(
+                    grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
+                    min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
+                    vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
+                    min_change_frac=args.gripper_min_change_frac if args.gripper_event_mode == "movement" else None,
+                    min_change_abs=args.gripper_min_change_abs,
+                )
+                stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
             if len(stages) > args.max_stages:
                 stages = stages[: args.max_stages]
                 stages[-1] = Stage(stages[-1].start, data["n"] - 1, "none")
@@ -727,14 +762,18 @@ def main() -> None:
             record_skipped_episode(skip_path, ep_idx, "tail_pass", exc)
         del data, source
 
-    if not eligible_episode_ids or not feature_parts:
+    if not eligible_episode_ids or (not feature_parts and annotation_input is None):
         print(f"No valid shared wrist queries; see {skip_path}", flush=True)
         dst.finalize()
         return
-    shared_features = concat_query_features(feature_parts)
-    query_sources = np.concatenate(query_source_parts).astype(np.int64)
-    query_source_xy = np.concatenate(query_xy_parts).astype(np.float32)
+    shared_features = concat_query_features(feature_parts) if feature_parts else None
+    query_sources = (np.concatenate(query_source_parts).astype(np.int64) if query_source_parts
+                     else np.empty((0, 2), dtype=np.int64))
+    query_source_xy = (np.concatenate(query_xy_parts).astype(np.float32) if query_xy_parts
+                      else np.empty((0, 2), dtype=np.float32))
     num_queries = len(query_sources)
+    if not num_queries:
+        print("No usable POV queries; continuing annotated third-person grounding with explicit POV failures", flush=True)
     del feature_parts
     bank_root = args.sidecar_dir or (dst_root / "point_tracks")
     bank_root.mkdir(parents=True, exist_ok=True)
@@ -753,7 +792,7 @@ def main() -> None:
     cache_stage_lists = []
     for epi, ep_idx in enumerate(eligible_episode_ids):
         source = _load_source_episode(
-            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend, revision=args.src_revision
         )
         data = None
         try:
@@ -821,7 +860,8 @@ def main() -> None:
         dst.finalize()
         return
 
-    selected_ids, n_aligned = _select_pov_points(tail_cache, stage_lists, args, tapir.device)
+    selected_ids, n_aligned = _select_pov_points(tail_cache, stage_lists, args, tapir.device,
+                                                   cross_demo=annotation_input is None)
     print(f"POV cross-demo alignment: {n_aligned} shared stage indices")
 
     # Pass 2: full-stage POV backtracking and third-person semantic tracks.
@@ -831,7 +871,7 @@ def main() -> None:
             continue
         print(f"\n=== Grounded preprocessing episode {ep_idx} ===", flush=True)
         source = _load_source_episode(
-            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend
+            LeRobotDataset, args.src_repo_id, ep_idx, src_root, args.video_backend, revision=args.src_revision
         )
         episode_started = perf_counter()
         data = None
@@ -855,18 +895,34 @@ def main() -> None:
         previous_camera_points = {cam: None for cam in CAMERAS_3P}
         transition_frames = int(round(fps * args.transition_persist_seconds))
         task = _task_text(data["tasks"])
-        try:
-            nouns = _extract_noun_phrases(task, nlp, args.max_task_objects)
-        except Exception as exc:
-            nouns = []
-            noun_failure = f"noun_extraction_failed:{exc}"
-        else:
-            noun_failure = None if nouns else ("task_text_missing" if not task else "no_task_noun_phrases")
-        entities = [GRIPPER_QUERY, *nouns]
-        print(f"task={task!r} entities={entities}", flush=True)
+        episode_entities = []
+        entity_cache = {}
+        annotation_stages = annotation_input.stages[ep_idx] if annotation_input else None
+        frame_tasks = list(data["tasks"])
+        if annotation_stages:
+            for annotated in annotation_stages:
+                frame_tasks[annotated["start_frame"]:annotated["end_frame"]] = [annotated["text"]] * (
+                    annotated["end_frame"] - annotated["start_frame"])
 
         for si, st in enumerate(stages):
             stage_started = perf_counter()
+            annotated = annotation_stages[si] if annotation_stages else None
+            stage_task = annotated["text"] if annotated else task
+            if stage_task not in entity_cache:
+                try:
+                    nouns = _extract_noun_phrases(stage_task, nlp, args.max_task_objects)
+                    noun_error = None
+                except Exception as exc:
+                    nouns, noun_error = [], f"noun_extraction_failed:{exc}"
+                entity_cache[stage_task] = (nouns, noun_error)
+            nouns, noun_error = entity_cache[stage_task]
+            preferred = annotated["entities"] if annotated else []
+            objects = list(dict.fromkeys([*preferred, *nouns]))[:args.max_task_objects]
+            noun_failure = None if objects else (noun_error or (
+                "task_text_missing" if not stage_task else "no_task_noun_phrases"))
+            entities = [GRIPPER_QUERY, *objects]
+            episode_entities = list(dict.fromkeys([*episode_entities, *entities]))
+            print(f"  subtask task={stage_task!r} entities={entities}", flush=True)
             print(f"  stage {si}: {st.end-st.start+1} frames", flush=True)
             # Inclusive stage boundaries may share a frame; reset slots so
             # an older stage cannot leak into the new current/previous pair.
@@ -1050,6 +1106,12 @@ def main() -> None:
             stage_record = {
                 "episode": int(ep_idx), "subtask": int(si), "start_frame": int(st.start), "end_frame": int(st.end),
                 "primitive": st.primitive,
+                "task": stage_task,
+                "annotation": ({k: annotated[k] for k in (
+                    "node_id", "start_frame", "end_frame", "text_source", "review_status",
+                    "aggregation_status", "caption_status", "caption_truncated")} if annotated else None),
+                "annotation_review_required": bool(annotated and (
+                    annotated["review_status"] != "accepted" or annotated["caption_truncated"])),
                 "pov": {
                     "source": "cross_demo_tail_cluster" if si < n_aligned else "local_tail_cluster",
                     "gripper_filter": cache.get("gripper_filter", {"status": "disabled"}),
@@ -1103,9 +1165,15 @@ def main() -> None:
         sidecar_root = args.sidecar_dir or (dst_root / "point_tracks")
         sidecar_root.mkdir(parents=True, exist_ok=True)
         sidecar = sidecar_root / f"ep{ep_idx:06d}.json"
+        if annotation_input:
+            annotation_input.write_episode(sidecar_root, ep_idx)
         sidecar.write_text(json.dumps({"episode": ep_idx, "destination_episode": int(dst.meta.total_episodes),
                                       "debug_overlays": args.debug_overlays,
-                                      "task": task, "entities": entities,
+                                      "task": task, "entities": episode_entities,
+                                      "source_repo_id": args.src_repo_id, "source_revision": args.src_revision,
+                                      "annotation_origin": annotation_input.origins[ep_idx] if annotation_input else None,
+                                      "annotation_file": f"annotations/ep{ep_idx:06d}.json" if annotation_input else None,
+                                      "annotation_frame_bounds": "half_open_source_frames" if annotation_input else None,
                                       "heatmap": {"sigma": args.heatmap_sigma, "alpha": args.heatmap_alpha},
                                       "subtasks": episode_records}, indent=2) + "\n", encoding="utf-8")
 
@@ -1116,7 +1184,7 @@ def main() -> None:
                 **data["extras"][t],
                 "observation.state": data["states"][t],
                 "action": data["actions"][t],
-                "task": data["tasks"][t] or task or "molmo_point_grounded_preprocess",
+                "task": frame_tasks[t] or task or "molmo_point_grounded_preprocess",
             }
             if _cam_key(CAMERA_WRIST) in dst.meta.features:
                 rgb = debug_renderer.render(wrist_frames[t], t, CAMERA_WRIST) if debug_renderer else wrist_frames[t]
@@ -1153,6 +1221,10 @@ def main() -> None:
             api.upload_file(path_or_fileobj=str(dst_root / "meta" / "grounding_output.json"),
                             path_in_repo="meta/grounding_output.json", repo_id=args.dst_repo_id,
                             repo_type="dataset", commit_message="Record grounding video output mode")
+            if annotation_manifest:
+                api.upload_file(path_or_fileobj=str(dst_root / "meta" / "grounding_annotations.json"),
+                                path_in_repo="meta/grounding_annotations.json", repo_id=args.dst_repo_id,
+                                repo_type="dataset", commit_message="Record annotation sources and immutable subtask boundaries")
             if args.debug_overlays:
                 card = ("---\nlicense: apache-2.0\ntags:\n- robotics\n- debug-overlays\n---\n\n"
                         "# Grounding debug dataset\n\n"
@@ -1174,7 +1246,7 @@ def main() -> None:
                     path_in_repo="point_tracks",
                     repo_id=args.dst_repo_id,
                     repo_type="dataset",
-                    allow_patterns=["*.json", "gripper_masks/*.npz", "gripper_masks/*.jpg", "mask_review/*.json", "mask_review/*.png"],
+                    allow_patterns=["*.json", "annotations/*.json", "gripper_masks/*.npz", "gripper_masks/*.jpg", "mask_review/*.json", "mask_review/*.png"],
                     commit_message="Upload per-subtask point tracks and grounding diagnostics",
                 )
     print("Done.")

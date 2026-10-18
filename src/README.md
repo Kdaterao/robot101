@@ -48,6 +48,10 @@ Shared modules live under `data/utilities/`:
 - `destination.py`: destination resume/recovery handling.
 - `validation.py`: episode shape checks, skip reports and statistics validation.
 - `hub_downloads.py`: download concurrency/retry and Windows cache helpers.
+- `cartesian_motion.py`: half-second measured gripper displacement profiles for
+  Claude aggregation, loaded from pinned source state data without video decoding.
+- `annotation_grounding.py`: load caption/aggregation outputs from local runs or
+  multiple Hub repos and map their selected subtask bounds/text to grounded data.
 
 Commands and settings: [Preprocessing](../docs/preprocessing.md) and
 [Molmo gripper point data](../docs/molmo_gripper_point_data.md).
