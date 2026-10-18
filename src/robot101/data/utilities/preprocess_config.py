@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Local annotation/aggregation output directories")
     p.add_argument("--annotation-revision", default="main")
     p.add_argument("--annotation-stage", choices=["auto", "captioning", "aggregation"], default="auto")
+    p.add_argument("--grounding-gripper-subdivision", action=argparse.BooleanOptionalAction, default=True,
+                   help="Subdivide annotation intervals at gripper events for point computation only; preserve caption/video boundaries")
     p.add_argument("--annotation-text", default="auto",
                    choices=["auto", "caption", "brief_action", "detailed_action", "brief_caption", "detailed_caption"],
                    help="Per-subtask task text; auto prefers aggregated brief_action, otherwise completed caption")

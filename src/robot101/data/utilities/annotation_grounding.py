@@ -88,13 +88,34 @@ class AnnotationGroundingInput:
                 data["timestamps"], record["timestamps"], atol=1e-4, rtol=0):
             raise ValueError(f"Episode {episode}: source timestamps differ from annotations")
 
-    def stage_list(self, episode, data, fps, max_stages):
+    def stage_list(self, episode, data, fps, max_stages, *, events=None, min_stage_frames=1):
         self.validate_source(episode, data, fps)
         if len(self.stages[episode]) > max_stages:
             raise ValueError("Annotation stage count exceeds --max-stages; raise the limit instead of merging boundaries")
         # Grounding uses inclusive Stage ends; annotation bounds remain half-open.
         # No gripper primitive is guessed from free-text action descriptions.
-        return [Stage(s["start_frame"], s["end_frame"] - 1, "none") for s in self.stages[episode]]
+        result = []
+        for parent in self.stages[episode]:
+            start, stop = parent["start_frame"], parent["end_frame"]
+            for event in sorted(events or [], key=lambda e: int(e["frame"])):
+                frame = int(event["frame"])
+                if not start <= frame < stop or frame - start + 1 < min_stage_frames:
+                    continue
+                # Event frame belongs to the segment reaching that gripper state.
+                # The next segment starts one frame later, avoiding duplicate ownership.
+                if frame < stop - 1 and stop - frame - 1 < min_stage_frames:
+                    continue
+                result.append(Stage(start, frame, event["type"]))
+                start = frame + 1
+            if start < stop:
+                result.append(Stage(start, stop - 1, "none"))
+        if len(result) > max_stages:
+            raise ValueError("Grounding subdivisions exceed --max-stages; raise the limit instead of merging annotation bounds")
+        return result
+
+    def parent_stage(self, episode, stage):
+        return next(s for s in self.stages[episode]
+                    if s["start_frame"] <= stage.start <= stage.end < s["end_frame"])
 
     def write_episode(self, root, episode):
         atomic_json(Path(root) / "annotations" / f"ep{episode:06d}.json",

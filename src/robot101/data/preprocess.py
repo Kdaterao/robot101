@@ -535,6 +535,20 @@ def _ground_and_track_camera(
 from robot101.data.utilities.preprocess_config import build_parser
 
 
+def _annotation_point_stages(annotation_input, episode, data, fps, args):
+    events = []
+    if args.grounding_gripper_subdivision:
+        grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
+        events = events_from_gripper_thresholds(
+            grip, fps=fps, closed_frac=args.gripper_closed_frac, open_frac=args.gripper_open_frac,
+            min_dwell_frames=args.gripper_min_dwell_frames, vel_stall=args.gripper_vel_stall,
+            vel_min=args.gripper_vel_min, smooth_window=args.gripper_smooth_window,
+            min_change_frac=args.gripper_min_change_frac if args.gripper_event_mode == "movement" else None,
+            min_change_abs=args.gripper_min_change_abs)
+    return annotation_input.stage_list(episode, data, fps, args.max_stages,
+                                      events=events, min_stage_frames=args.min_stage_frames), events
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if any(not np.isfinite(v) or v < 0 for v in (args.pov_visibility_gap_seconds, args.third_person_visibility_gap_seconds)):
@@ -588,6 +602,13 @@ def main() -> None:
     if not episode_ids or any(i < 0 or i >= int(src_meta.total_episodes) for i in episode_ids):
         raise SystemExit("Selected source episode IDs are empty or out of range")
     annotation_manifest = annotation_input.manifest() if annotation_input else None
+    if annotation_manifest and args.grounding_gripper_subdivision:
+        annotation_manifest.pop("fingerprint")
+        annotation_manifest["point_subdivision"] = dict(
+            method="within_annotation_gripper_events_v1",
+            settings={key: value for key, value in vars(args).items()
+                      if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
+        annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
     print(f"Source episodes={len(episode_ids)} fps={fps}")
     cameras = [CAMERA_WRIST, *CAMERAS_3P]
     progress_path = HF_LEROBOT_HOME / args.dst_repo_id / "_preprocess_done.json"
@@ -640,8 +661,7 @@ def main() -> None:
                 print(f"[skip ep {ep_idx}] metadata shape: {exc}", flush=True)
                 continue
             if annotation_input:
-                stages = annotation_input.stage_list(ep_idx, data, fps, args.max_stages)
-                events = []
+                stages, events = _annotation_point_stages(annotation_input, ep_idx, data, fps, args)
             else:
                 grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
                 events = events_from_gripper_thresholds(
@@ -652,7 +672,8 @@ def main() -> None:
                     min_change_abs=args.gripper_min_change_abs,
                 )
                 stages = stages_from_events(events, data["n"], args.min_stage_frames, args.first_primitive)
-            origin = "annotation selected cut" if annotation_input else f"{len(events)} gripper events"
+            origin = (f"annotation cut + {len(events)} gripper events (points only)" if annotation_input
+                      else f"{len(events)} gripper events")
             print(f"episode {ep_idx}: {origin}, stages=" + ", ".join(f"[{s.start},{s.end}]" for s in stages))
         return
 
@@ -711,8 +732,7 @@ def main() -> None:
         try:
             data = load_episode_metadata(source, cameras)
             if annotation_input:
-                stages = annotation_input.stage_list(ep_idx, data, fps, args.max_stages)
-                events = []
+                stages, events = _annotation_point_stages(annotation_input, ep_idx, data, fps, args)
             else:
                 grip = data["gripper"] if args.gripper_source == "state" else data["action_gripper"]
                 events = events_from_gripper_thresholds(
@@ -906,7 +926,7 @@ def main() -> None:
 
         for si, st in enumerate(stages):
             stage_started = perf_counter()
-            annotated = annotation_stages[si] if annotation_stages else None
+            annotated = annotation_input.parent_stage(ep_idx, st) if annotation_input else None
             stage_task = annotated["text"] if annotated else task
             if stage_task not in entity_cache:
                 try:
@@ -1105,6 +1125,8 @@ def main() -> None:
 
             stage_record = {
                 "episode": int(ep_idx), "subtask": int(si), "start_frame": int(st.start), "end_frame": int(st.end),
+                "interval_role": "grounding_only" if annotated else "gripper_stage",
+                "grounding_segment_id": f"g{si:04d}",
                 "primitive": st.primitive,
                 "task": stage_task,
                 "annotation": ({k: annotated[k] for k in (

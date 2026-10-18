@@ -37,8 +37,15 @@ The adapter:
 - Loads the exact source dataset **revision and episode IDs** referenced by the
   annotations, in a revision-isolated cache. Later source releases may trim or
   reindex episodes, so switching to the current source revision is not allowed.
-- Uses only `selected_node_ids`. Half-open annotation bounds `[start,end)` become
-  inclusive tracking stages `[start,end-1]`, with no new gripper-based splitting.
+- Uses `selected_node_ids` as unchanged caption boundaries. By default, detected
+  gripper opening/closing events further subdivide each annotation interval for
+  **grounding points only**. The detector uses the existing movement thresholds,
+  smoothing and dwell settings. Each grounding segment stays inside its parent
+  caption, and inherits its text; no caption nodes or video clips are created.
+  Event frames belong to the preceding grounding segment and the next starts
+  one frame later. No events means one grounding interval for that caption.
+  `--no-grounding-gripper-subdivision` restores one tracking interval per caption.
+  Half-open annotation bounds `[start,end)` map to inclusive grounding intervals.
   Gaps, overlaps, incomplete coverage, source FPS/frame-count/timestamp mismatch,
   or too many stages are errors; boundaries are never silently merged or replaced.
 - Uses each subtask's `aggregation.brief_action` when aggregation is available,
@@ -59,6 +66,16 @@ The adapter:
   `meta/grounding_annotations.json`. These sidecars are uploaded with the output.
   `annotation_review_required` stays true for unreviewed/truncated annotations;
   successful tracking does not validate the original caption.
+
+Each point-track record has a `grounding_segment_id`, `interval_role=grounding_only`,
+its own tracking bounds, and an `annotation` link retaining the parent's original
+node ID/bounds. Tail clustering, SAM windows, endpoint selection and transition
+overlap operate on these grounding intervals. Annotation frame tasks and Claude
+captions retain their original boundaries. The combiner groups grounding intervals
+under their parent caption; the viewer switches captions at annotation boundaries.
+Use a **new destination repo** when enabling this on older grounding runs: resume
+rejects the changed point-subdivision policy. Gripper thresholds still need tuning
+for the data; extra subdivisions do not certify grasp/release success.
 
 Defaults: `--annotation-stage auto` prefers `aggregation/` when it exists on a
 Hub repo, otherwise `captioning/`. For local inputs, point to the run directory
