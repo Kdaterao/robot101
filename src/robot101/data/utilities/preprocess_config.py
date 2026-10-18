@@ -73,7 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Exclude SAM 2 gripper masks from POV clustering; failed masks require review")
     p.add_argument("--sam2-model", default="facebook/sam2.1-hiera-tiny")
     p.add_argument("--sam2-full-episode", action=argparse.BooleanOptionalAction, default=True,
-                   help="Propagate POV masks across the whole episode; Molmo only initializes or recovers invalid masks")
+                   help="Propagate POV masks across the whole episode, with sparse Molmo refresh/recovery")
+    p.add_argument("--sam2-gripper-refresh-fps", type=float, default=1.0,
+                   help="Periodic POV Molmo gripper detections for SAM reanchoring; use 0.5 for every 2s, 0 for recovery-only")
     p.add_argument("--sam2-max-recoveries", type=int, default=5,
                    help="Maximum automatic POV reinitializations after the initial attempt")
     p.add_argument("--sam2-recovery-retry-frames", type=int, default=30,

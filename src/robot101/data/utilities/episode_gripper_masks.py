@@ -1,4 +1,4 @@
-"""Full-episode POV masks with initialization/recovery-only Molmo prompting."""
+"""Full-episode POV masks with sparse Molmo gripper refreshes and recovery."""
 from pathlib import Path
 from time import perf_counter
 
@@ -9,13 +9,19 @@ from robot101.data.utilities.annotation_tree import atomic_json
 from robot101.perception.gripper_masks import BODY_PROMPT, NEGATIVE_PROMPT, valid_points, filter_candidates
 
 
-def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, args):
+def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, args, *, fps=30.0):
     root = Path(root)
     directory, review = root / 'gripper_masks', root / 'mask_review'
     directory.mkdir(parents=True, exist_ok=True)
     review.mkdir(parents=True, exist_ok=True)
     h, w = frames[0].shape[:2]
     real = np.asarray(real, bool)
+    refresh_fps = float(args.sam2_gripper_refresh_fps)
+    if refresh_fps > fps:
+        raise ValueError('POV gripper refresh FPS cannot exceed source FPS')
+    refresh_frames = (np.unique(np.rint(np.arange(0, len(frames), fps / refresh_fps)).astype(int))
+                      if refresh_fps > 0 else np.asarray([], int))
+    refresh_frames = refresh_frames[refresh_frames < len(frames)].tolist()
     manual = {}
     for key, value in corrections.items():
         if key.split(':', 1)[0] == str(episode):
@@ -40,7 +46,7 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
                 value = manual[frame]
                 points = valid_points({'points_xy': value['points_xy']}, w, h)
                 return frame, points, value.get('labels', [1]*len(points)), True
-            print(f'  POV Molmo ep{episode}: initialize/recover at frame {frame}', flush=True)
+            print(f'  POV Molmo ep{episode}: initialize/refresh/recover at frame {frame}', flush=True)
             result = molmo.ground(frames[frame], BODY_PROMPT)
             points = valid_points(result, w, h)
             prompts.append(dict(frame=frame, role='gripper_body', points_xy=points.tolist(), error=result.get('error')))
@@ -99,7 +105,7 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
             masks, valid, events = sam.propagate_episode(
                 frames, real, initialize, refine, validate,
                 max_recoveries=args.sam2_max_recoveries, retry_frames=args.sam2_recovery_retry_frames,
-                correction_frames=manual)
+                correction_frames=manual, refresh_frames=refresh_frames)
         except Exception as exc:
             masks = np.zeros((len(frames), h, w), bool)
             valid = np.zeros(len(frames), bool)
@@ -111,6 +117,7 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
         camera='wrist', episode=episode, window=[0, len(frames)-1],
         mask_file=path.relative_to(root).as_posix(), model=sam.model_id,
         mask_seconds=perf_counter()-started, valid_frame_count=int(valid.sum()),
+        gripper_refresh_fps=refresh_fps, scheduled_refresh_frames=refresh_frames,
         episode_manual_review_required=not bool(valid.all()),
         events=events, prompts=prompts)
     for event in events:

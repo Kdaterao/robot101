@@ -148,9 +148,14 @@ and gripper stage options.
 ### SAM mask spill checks
 
 By default, **POV-only** SAM 2 runs across the whole episode. Molmo initializes
-the mask at the beginning, then runs again only when the mask is empty, excessive,
-grows suspiciously or propagation otherwise fails validation. Annotation and
-grounding subtask boundaries do not reset SAM or trigger extra Molmo calls.
+the mask at the beginning and refreshes gripper detections at **1 FPS**. Use
+`--sam2-gripper-refresh-fps 0.5` for one detection every two seconds, or `0` for
+initialization/recovery-only behavior. SAM propagates between refreshes. Each
+refresh uses the provisional-mask/negative-prompt refinement before propagation;
+this is sparse gripper detection, not video input to Molmo. Additional recovery
+attempts can occur when the mask is empty, excessive, grows suspiciously or fails
+validation. Scheduled refreshes do not consume the recovery budget. Annotation and
+grounding subtask boundaries do not independently trigger extra Molmo calls.
 Third-person grounding and its separate Molmo calls are unchanged.
 
 Molmo searches the first three valid frames at initialization/recovery

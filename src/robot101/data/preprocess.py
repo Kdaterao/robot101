@@ -588,6 +588,8 @@ def main() -> None:
         raise SystemExit("--sam2-seed-search-frames must be positive")
     if args.sam2_max_recoveries < 0 or args.sam2_recovery_retry_frames < 1:
         raise SystemExit("SAM recovery count must be nonnegative and retry frames positive")
+    if not np.isfinite(args.sam2_gripper_refresh_fps) or args.sam2_gripper_refresh_fps < 0:
+        raise SystemExit("--sam2-gripper-refresh-fps must be finite and nonnegative")
     if (not 0 < args.sam2_max_area_fraction <= 1
             or not np.isfinite(args.sam2_max_growth_ratio) or args.sam2_max_growth_ratio <= 1
             or not 0 <= args.sam2_growth_area_fraction <= 1):
@@ -627,7 +629,7 @@ def main() -> None:
                       if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
         annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
     goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1",
-                   "pov_mask_policy": "full_episode_pov_initialization_recovery_v3" if args.sam2_full_episode else "sequential_body_mask_object_negatives_v2",
+                   "pov_mask_policy": "full_episode_pov_sparse_refresh_v4" if args.sam2_full_episode else "sequential_body_mask_object_negatives_v2",
                    "mask_settings": {key: value for key, value in vars(args).items()
                                      if key.startswith("sam2_") and key != "sam2_corrections"},
                    "mask_corrections_fingerprint": fingerprint(json.loads(args.sam2_corrections.read_text()))
@@ -867,7 +869,7 @@ def main() -> None:
                 validate_episode_shapes(data, src_meta.features, [CAMERA_WRIST])
                 episode_masks, episode_mask_valid, episode_mask_info = prepare_episode_masks(
                     data['frames'][CAMERA_WRIST], data['masks'][CAMERA_WRIST],
-                    molmo, sam, bank_root, ep_idx, corrections, args)
+                    molmo, sam, bank_root, ep_idx, corrections, args, fps=fps)
             if sam is not None and not args.sam2_full_episode and hasattr(molmo, "ground_batch"):
                 requests, request_stages = [], []
                 for si, stage in enumerate(stages):

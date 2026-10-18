@@ -161,8 +161,9 @@ recover missing annotation episodes or guarantee all 73 planned episodes exist.
 
 The new grounding flag is on by default and is explicit above for clarity.
 POV SAM masks now propagate across the full episode by default
-(`--sam2-full-episode`). Molmo initializes/reinitializes the POV mask only at
-startup or after invalid/lost masks, not at subtask boundaries. Third-person
+(`--sam2-full-episode`). Molmo refreshes the POV gripper at 1 FPS by default;
+use `--sam2-gripper-refresh-fps 0.5` for every two seconds, or `0` for only
+initialization/loss recovery. Refreshes do not follow subtask boundaries. Third-person
 behavior is unchanged. Use a new destination if the previous run used masks only
 in clustering windows. Clustering itself still uses those windows. Recovery
 defaults: five automatic recoveries, with a 30-frame gap after a failed retry;

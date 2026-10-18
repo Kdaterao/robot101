@@ -91,8 +91,8 @@ class GripperMaskWorker:
         return output
 
     def propagate_episode(self, frames, real, initialize, refine, validate, *,
-                          max_recoveries=5, retry_frames=30, correction_frames=()):
-        """One POV video state; redetect only on initialization or invalid propagation."""
+                          max_recoveries=5, retry_frames=30, correction_frames=(), refresh_frames=()):
+        """One POV video state with sparse gripper refreshes and invalid-mask recovery."""
         import torch
         real = np.asarray(real, bool)
         h, w = frames[0].shape[:2]
@@ -100,6 +100,7 @@ class GripperMaskWorker:
         accepted = np.zeros(len(frames), bool)
         events, cursor, automatic_attempts = [], 0, 0
         corrections = set(correction_frames)
+        refreshes = set(refresh_frames) - {0}
         with tempfile.TemporaryDirectory(prefix='robot101-sam2-episode-') as directory:
             for i, frame in enumerate(frames):
                 if frame.shape != (h, w, 3):
@@ -116,13 +117,14 @@ class GripperMaskWorker:
                             cursor += 1
                             continue
                         manual = cursor in corrections
-                        if not manual and automatic_attempts >= max_recoveries + 1:
+                        scheduled = cursor in refreshes
+                        if not manual and not scheduled and automatic_attempts >= max_recoveries + 1:
                             events.append(dict(frame=cursor, status='needs_review', reason='recovery_budget_exhausted'))
                             # Still honor explicit later human corrections.
-                            later = [f for f in corrections if f > cursor and real[f]]
+                            later = [f for f in corrections | refreshes if f > cursor and real[f]]
                             cursor = min(later) if later else len(frames)
                             continue
-                        if not manual:
+                        if not manual and not scheduled:
                             automatic_attempts += 1
                         self.predictor.reset_state(state)
                         attempt_start, seed = cursor, cursor
@@ -155,13 +157,14 @@ class GripperMaskWorker:
                                     status='needs_review', reason='no_mask_before_valid_seed'))
                             seed_area = previous_area = float(mask.mean())
                             events.append(dict(frame=seed, requested_frame=attempt_start,
-                                status='initialized' if automatic_attempts <= 1 and not manual else 'reinitialized',
+                                status=('scheduled_refresh' if scheduled and not manual else
+                                        'initialized' if automatic_attempts <= 1 and not manual else 'reinitialized'),
                                 manual=bool(manual), points_xy=points.tolist(), labels=labels.tolist()))
                             failed_at = None
                             for index, _, logits in self.predictor.propagate_in_video(state, start_frame_idx=seed):
                                 if index == seed:
                                     continue
-                                if index in corrections:
+                                if index in corrections or index in refreshes:
                                     failed_at = index
                                     break
                                 mask = (logits[0, 0] > 0).cpu().numpy()
@@ -180,7 +183,7 @@ class GripperMaskWorker:
                                                status='needs_review', reason=str(exc)))
                             # No valid mask: retry later, rather than calling Molmo every frame.
                             cursor = max(attempt_start + 1, int(seed) + retry_frames)
-                            later = [f for f in corrections if attempt_start < f < cursor and real[f]]
+                            later = [f for f in corrections | refreshes if attempt_start < f < cursor and real[f]]
                             if later:
                                 cursor = min(later)
                 finally:
