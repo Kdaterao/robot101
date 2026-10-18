@@ -5,7 +5,8 @@ Query descriptors sampled from multiple stage-tail frames keep the same identity
 across demonstrations. Points are selected from their stage-tail tracks and
 then tracked backward through each full stage. SAM 2 excludes the POV gripper
 and weights nearby candidates. Third-person candidates are grounded at the
-subtask start, tracked forward, and selected by endpoint gripper proximity.
+subtask start, tracked forward for association, and selected by endpoint gripper proximity.
+Selected third-person endpoint goals remain stationary throughout each interval.
 Unresolved goals can use a stationary exact-end-frame gripper snapshot. Diagnostics are
 written beside the LeRobot output in ``point_tracks/``.
 """
@@ -454,6 +455,15 @@ def _ground_and_track_camera(
                 "visibility_gap_seconds": visibility_gap_seconds,
                 "tracking_sample_frames": (indices+stage.start).tolist()}
 
+    def snapshot(points, source, entity, distance=None):
+        tracks = np.repeat(points[:, None, :], len(clip), axis=1)
+        visible = np.broadcast_to(stage_masks, tracks.shape[:2]).copy()
+        result = finish(tracks, visible, points, source, entity, stage.end, "static", distance)
+        result.update(goal_mode="static_endpoint_snapshot", snapshot_frame=int(stage.end),
+                      snapshot_source="exact_endpoint_gripper" if source == "gripper_fallback" else "selected_object_endpoint",
+                      tracking_sample_frames=[])
+        return result
+
     endpoint_gripper = None
 
     def fallback(reason):
@@ -463,12 +473,8 @@ def _ground_and_track_camera(
             return unresolved("endpoint_gripper_grounding_failed")
         # The endpoint gripper position is a fixed spatial goal, not a
         # trajectory of the gripper. Keep it stationary on real camera frames.
-        tracks = np.repeat(points[:, None, :], len(clip), axis=1)
-        visible = np.broadcast_to(stage_masks, tracks.shape[:2]).copy()
-        result = finish(tracks, visible, points, "gripper_fallback",
-                        GRIPPER_QUERY, stage.end, "static")
-        result.update(fallback_mode="static_endpoint_snapshot", snapshot_frame=int(stage.end),
-                      snapshot_source="exact_endpoint_gripper", tracking_sample_frames=[])
+        result = snapshot(points, "gripper_fallback", GRIPPER_QUERY)
+        result.update(fallback_mode="static_endpoint_snapshot")
         return result
 
     if not stage_masks[0]:
@@ -528,8 +534,10 @@ def _ground_and_track_camera(
     if len(close) > 1 and close[1][0]-close[0][0] <= ambiguity_margin:
         return fallback("ambiguous_object_match")
     distance, entity, chosen = close[0]
-    return finish(tracks[chosen], visible[chosen], points[chosen], "semantic_object",
-                  entity, stage.start, "forward", distance)
+    result = snapshot(tracks[chosen, -1], "semantic_object", entity, distance)
+    result["candidate_tracking_sample_frames"] = (indices + stage.start).tolist()
+    result["candidate_seed_frame"] = int(stage.start)
+    return result
 
 
 from robot101.data.utilities.preprocess_config import build_parser
@@ -609,6 +617,11 @@ def main() -> None:
             settings={key: value for key, value in vars(args).items()
                       if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
         annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
+    goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1"}
+    if annotation_manifest:
+        annotation_manifest.pop("fingerprint")
+        annotation_manifest["goal_policy"] = goal_policy
+        annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
     print(f"Source episodes={len(episode_ids)} fps={fps}")
     cameras = [CAMERA_WRIST, *CAMERAS_3P]
     progress_path = HF_LEROBOT_HOME / args.dst_repo_id / "_preprocess_done.json"
@@ -618,6 +631,11 @@ def main() -> None:
     dst = None
     if not args.dry_run:
         try:
+            policy_path = dst_root / "meta" / "grounding_goal_policy.json"
+            info_path = dst_root / "meta" / "info.json"
+            if info_path.exists() and json.loads(info_path.read_text()).get("total_episodes", 0):
+                if not policy_path.exists() or json.loads(policy_path.read_text()) != goal_policy:
+                    raise ValueError("Destination uses older moving third-person goals; choose a fresh --dst-repo-id")
             check_output_mode(dst_root, args.debug_overlays)
             check_grounding_annotations(dst_root, annotation_manifest)
         except ValueError as exc:
@@ -645,6 +663,7 @@ def main() -> None:
             )
         install_statistics_validation(dst.meta.features)
         write_output_mode(dst_root, args.debug_overlays)
+        atomic_json(dst_root / "meta" / "grounding_goal_policy.json", goal_policy)
         if annotation_manifest:
             atomic_json(dst_root / "meta" / "grounding_annotations.json", annotation_manifest)
 
@@ -1073,23 +1092,14 @@ def main() -> None:
                 prior = previous_camera_points[cam]
                 if transition_frames > 0 and prior is not None:
                     try:
-                        if prior.get("source") == "gripper_fallback":
-                            carry_points = prior["points"]
-                            length = min(transition_frames, n-st.start)
-                            carry_tracks = np.repeat(carry_points[:, None, :], length, axis=1)
-                            carry_vis = np.broadcast_to(
-                                data["masks"][cam][st.start:st.start+length], carry_tracks.shape[:2]).copy()
-                            raw_carry_vis = carry_vis.copy()
-                            transition.update(fallback_mode="static_endpoint_snapshot",
-                                              snapshot_frame=prior["frame"])
-                        else:
-                            carry_tracks, carry_vis, carry_points, raw_carry_vis = _track_transition_points(
-                                tapir, data["frames"][cam], data["masks"][cam],
-                                prior["frame"], st.start, transition_frames, prior["points"],
-                                fps=fps, tracking_fps=args.third_person_tracking_fps,
-                                visibility_gap_seconds=args.third_person_visibility_gap_seconds,
-                                label=f"ep{ep_idx}/stage{si}/{cam}/transition",
-                            )
+                        carry_points = prior["points"]
+                        length = min(transition_frames, n-st.start)
+                        carry_tracks = np.repeat(carry_points[:, None, :], length, axis=1)
+                        carry_vis = np.broadcast_to(
+                            data["masks"][cam][st.start:st.start+length], carry_tracks.shape[:2]).copy()
+                        raw_carry_vis = carry_vis.copy()
+                        transition.update(goal_mode="static_endpoint_snapshot",
+                                          snapshot_frame=prior["frame"])
                         transition.update(
                             status="ok" if bool(carry_vis.any()) else "tracker_lost",
                             seed_points=carry_points.tolist(), tracks=carry_tracks.tolist(),
@@ -1191,6 +1201,7 @@ def main() -> None:
             annotation_input.write_episode(sidecar_root, ep_idx)
         sidecar.write_text(json.dumps({"episode": ep_idx, "destination_episode": int(dst.meta.total_episodes),
                                       "debug_overlays": args.debug_overlays,
+                                      "goal_policy": goal_policy,
                                       "task": task, "entities": episode_entities,
                                       "source_repo_id": args.src_repo_id, "source_revision": args.src_revision,
                                       "annotation_origin": annotation_input.origins[ep_idx] if annotation_input else None,
@@ -1240,6 +1251,9 @@ def main() -> None:
             from huggingface_hub import HfApi
 
             api = HfApi()
+            api.upload_file(path_or_fileobj=str(dst_root / "meta" / "grounding_goal_policy.json"),
+                            path_in_repo="meta/grounding_goal_policy.json", repo_id=args.dst_repo_id,
+                            repo_type="dataset", commit_message="Record stationary third-person goal policy")
             api.upload_file(path_or_fileobj=str(dst_root / "meta" / "grounding_output.json"),
                             path_in_repo="meta/grounding_output.json", repo_id=args.dst_repo_id,
                             repo_type="dataset", commit_message="Record grounding video output mode")

@@ -112,6 +112,13 @@ export ANNOTATION_REPO="kdaterao/so101_spread73_v1_annotations_vm${WORKER}"
 export GROUNDING_REPO="kdaterao/so101_spread73_v2_grounded_vm${WORKER}"
 ```
 
+All third-person goals now use stationary endpoint coordinates, including
+transition carryover; candidate tracking remains only for object association.
+POV points continue tracking normally. If you already wrote episodes with the
+older moving-object goals, choose another fresh destination (for example append
+`_static` to `GROUNDING_REPO`) and use that same name in `--replace-repo` below.
+Resume rejects mixing old moving goals with stationary goals.
+
 ## 3. Inspect the new point intervals first
 
 This checks source metadata and prints grounding intervals without loading models

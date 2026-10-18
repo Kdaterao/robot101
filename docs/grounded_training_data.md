@@ -54,7 +54,13 @@ The adapter:
   object/destination fields are also prioritized as third-person candidates.
 - Preserves the POV tail window, next-stage extension, SAM exclusion/weighting,
   backward TAPIR tracking, transition overlap and exact-endpoint stationary
-  third-person fallback behavior. Annotated stages use local point selection:
+  third-person fallback behavior. All third-person goal markers are stationary
+  endpoint snapshots, including selected object goals and transition carryover.
+  Forward TAPIR tracks are used only to associate candidate objects with the
+  endpoint gripper; they are not exported as moving goal markers. Missing camera
+  frames remain invisible. Static goals are spatial targets, not assertions of
+  continuous object visibility. POV tracking remains unchanged.
+  Annotated stages use local point selection:
   **cross-demo funneling by numeric stage index is disabled**, because different
   episodes need not contain matching actions at the same stage number. The shared
   appearance-query bank remains; begin validation with one or a few episodes.
