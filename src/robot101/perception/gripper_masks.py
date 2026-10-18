@@ -12,6 +12,12 @@ BODY_PROMPT = (
     'Point to visible solid parts of the robot gripper body and each finger. '
     'Do not point to the empty space between the jaws or to the held object.'
 )
+NEGATIVE_PROMPT = (
+    'Point inside visible non-robot objects touching or immediately beside the robot gripper, '
+    'including any object held between the fingers. These are objects to EXCLUDE from a gripper mask. '
+    'Do not point to the robot body, fingers, empty space or background. '
+    'Return no points if no such object is visible.'
+)
 
 
 def valid_points(raw, width, height):

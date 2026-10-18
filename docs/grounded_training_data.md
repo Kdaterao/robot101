@@ -145,6 +145,40 @@ and gripper stage options.
 
 ## Batching and download workers
 
+### SAM mask spill checks
+
+By default, Molmo supplies positive gripper-body/finger points and a separate
+request supplies negative points inside visible nearby/held non-robot objects.
+SAM must include positive prompts and exclude negative prompts on that exact
+prompt frame. Near-coincident positive/negative points require review. Negative
+coordinates are not treated as stationary constraints across other video frames.
+
+Mask growth exceeding **2×** the seed or preceding-frame area, with an absolute
+increase exceeding **2% of the image area**, queues correction. These are
+conservative heuristics, not proof of correct segmentation. Failed masks do not
+cull points or provide clustering candidates for that interval.
+
+Useful controls: `--sam2-max-growth-ratio 2`,
+`--sam2-growth-area-fraction 0.02`, and `--sam2-max-area-fraction 0.8`.
+Automatic negative points are required by default; if Molmo returns none, the
+interval needs human correction. `--no-sam2-require-negative-points` permits a
+positive-only mask when no negatives are returned, weakening this safeguard.
+`--no-sam2-negative-prompts` disables the additional object request entirely.
+
+Correct queued masks on your laptop with:
+
+```bash
+.venv-viewer/bin/python scripts/fix_gripper_masks.py \
+  --review-dir /path/to/point_tracks/mask_review
+```
+
+Left-click solid gripper pixels; right-click the object pixels incorrectly
+included by SAM. Enter saves. Pass the resulting file with
+`--sam2-corrections /path/to/point_tracks/mask_corrections.json` on a **new output
+destination**. The correction frame must match its saved clustering window.
+The model input and mask policy are fingerprinted, so changing mask settings or
+corrections cannot silently resume previously completed intervals.
+
 These settings control different parts of the run:
 
 - `--molmo-batch-size 4` batches image-and-prompt requests for Molmo on the GPU.

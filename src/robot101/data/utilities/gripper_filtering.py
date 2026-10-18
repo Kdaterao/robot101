@@ -4,11 +4,13 @@ import json
 from time import perf_counter
 import cv2
 import numpy as np
-from robot101.perception.gripper_masks import BODY_PROMPT, valid_points, filter_candidates
+from robot101.perception.gripper_masks import BODY_PROMPT, NEGATIVE_PROMPT, valid_points, filter_candidates
 
 
 def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subtask,
-                           corrections, max_weight, radius_fraction, goal_tail_frames, prompt_result=None):
+                           corrections, max_weight, radius_fraction, goal_tail_frames, prompt_result=None,
+                           negative_result=None, negative_prompts=True, require_negatives=True,
+                           max_area_fraction=0.8, max_growth_ratio=2.0, growth_area_fraction=0.02):
     start = entry['tail_start']
     length = entry['tracks'].shape[1]
     clip = frames[start:start+length]
@@ -23,7 +25,8 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
     metadata = {'status': 'failed', 'manual_review_required': True,
                 'camera': 'wrist', 'episode': int(episode), 'subtask': int(subtask),
                 'window': [start, start+length-1], 'model': getattr(sam, 'model_id', None),
-                'mask_validation': {'min_pixels': 8, 'max_area_fraction': 0.8},
+                'mask_validation': {'min_pixels': 8, 'max_area_fraction': max_area_fraction,
+                                    'max_growth_ratio': max_growth_ratio, 'growth_area_fraction': growth_area_fraction},
                 'max_weight': max_weight,
                 'radius_fraction': radius_fraction, 'correction_key': key}
     try:
@@ -43,6 +46,21 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
         else:
             points = valid_points(prompt_result if prompt_result is not None else molmo.ground(clip[seed], BODY_PROMPT), w, h)
             labels = [1]*len(points)
+            if negative_prompts:
+                raw = negative_result if negative_result is not None else molmo.ground(clip[seed], NEGATIVE_PROMPT)
+                if raw.get('error'):
+                    raise ValueError(f"negative_prompt_failed:{raw['error']}")
+                negatives = valid_points(raw, w, h)
+                metadata['negative_prompt'] = NEGATIVE_PROMPT
+                metadata['negative_points_xy'] = negatives.tolist()
+                if len(negatives) and len(points) and (np.linalg.norm(
+                        negatives[:, None] - points[None], axis=-1) <= 3).any():
+                    raise ValueError('positive_negative_prompts_conflict')
+                if not len(negatives) and require_negatives:
+                    raise ValueError('object_negative_points_unavailable')
+                labels += [0]*len(negatives)
+                points = np.concatenate([points, negatives])
+                source = 'molmo_body_and_object_prompts'
         if not len(points):
             raise ValueError('no_visible_gripper_body_points')
         started = perf_counter()
@@ -54,14 +72,29 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
         area = masks.mean(axis=(1, 2))
         # Reject empty or near-full-frame segmentations; these checks do not
         # assert semantic correctness. Human inspection is still necessary.
-        if (masks.sum(axis=(1, 2)) < 8).any() or (area > 0.8).any():
+        if (masks.sum(axis=(1, 2)) < 8).any() or (area > max_area_fraction).any():
             raise ValueError('empty_or_excessive_gripper_mask')
+        baseline = np.maximum(area[seed], 1 / (h*w))
+        growth = ((area > baseline * max_growth_ratio) & (area - baseline > growth_area_fraction))
+        jumps = ((area[1:] > area[:-1] * max_growth_ratio)
+                 & (area[1:] - area[:-1] > growth_area_fraction))
+        if growth.any() or jumps.any():
+            metadata['area_fraction'] = area.tolist()
+            suspicious = list(np.flatnonzero(growth)) + (np.flatnonzero(jumps) + 1).tolist()
+            metadata['review_frame_index'] = start + min(suspicious)
+            raise ValueError('suspicious_gripper_mask_growth')
         positive = np.asarray(labels) == 1
         px = np.rint(points[positive]).astype(int)
         px[:, 0] = np.clip(px[:, 0], 0, w-1)
         px[:, 1] = np.clip(px[:, 1], 0, h-1)
         if not len(px) or not masks[seed, px[:, 1], px[:, 0]].all():
             raise ValueError('mask_misses_positive_prompt')
+        negative = np.rint(points[np.asarray(labels) == 0]).astype(int)
+        if len(negative):
+            negative[:, 0] = np.clip(negative[:, 0], 0, w-1)
+            negative[:, 1] = np.clip(negative[:, 1], 0, h-1)
+            if masks[seed, negative[:, 1], negative[:, 0]].any():
+                raise ValueError('mask_contains_negative_object_prompt')
         filtered, visibility, weights, eligible, endpoints = filter_candidates(
             entry['tracks'], entry['visible'], masks, max_weight, radius_fraction, goal_tail_frames)
         entry.update(tracks=filtered, visible=visibility, observation_weights=weights,
@@ -92,12 +125,16 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
         entry['visible'][:] = False
         entry['eligible'] = np.zeros(len(entry['tracks']), bool)
         review = review_dir / f'{stem}.json'
-        if clip and 0 <= seed < length and isinstance(clip[seed], np.ndarray):
+        review_frame = int(metadata.get('review_frame_index', start+seed)) - start
+        if clip and 0 <= review_frame < length and isinstance(clip[review_frame], np.ndarray):
             image = review_dir / f'{stem}.png'
-            cv2.imwrite(str(image), cv2.cvtColor(clip[seed], cv2.COLOR_RGB2BGR))
+            cv2.imwrite(str(image), cv2.cvtColor(clip[review_frame], cv2.COLOR_RGB2BGR))
             metadata['review_image'] = image.name
-        review.write_text(json.dumps({**metadata, 'frame_index': start+seed,
-                                     'prompt': BODY_PROMPT}, indent=2)+'\n')
+        review.write_text(json.dumps({**metadata, 'frame_index': start+review_frame,
+                                     'prompt_seed_frame': start+seed,
+                                     'prompt': BODY_PROMPT,
+                                     'points_xy': np.asarray(points).reshape(-1, 2).tolist(),
+                                     'labels': list(labels)}, indent=2)+'\n')
     metadata.update(seed_frame=start+seed, prompt=BODY_PROMPT, prompt_source=source,
                     points_xy=np.asarray(points).reshape(-1, 2).tolist(), labels=list(labels))
     print(f"  SAM 2 ep{episode}/stage{subtask}: {metadata['status']} {metadata.get('reason', '')}", flush=True)

@@ -41,7 +41,7 @@ from robot101.data.utilities.episode_helpers import (
     _save_progress,
 )
 from robot101.perception.molmo2 import Molmo2Worker
-from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT
+from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT, NEGATIVE_PROMPT
 from robot101.data.utilities.gripper_filtering import prepare_gripper_filter
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
@@ -583,6 +583,10 @@ def main() -> None:
         raise SystemExit("Gripper change fraction must be in (0, 1]; absolute change must be finite and nonnegative")
     if args.min_stage_frames < 1 or args.max_stages < 1:
         raise SystemExit("Stage frame/count limits must be positive")
+    if (not 0 < args.sam2_max_area_fraction <= 1
+            or not np.isfinite(args.sam2_max_growth_ratio) or args.sam2_max_growth_ratio <= 1
+            or not 0 <= args.sam2_growth_area_fraction <= 1):
+        raise SystemExit("SAM area limits must be finite fractions and growth ratio must exceed 1")
     LeRobotDataset, LeRobotDatasetMetadata, DEFAULT_FEATURES, HF_LEROBOT_HOME = _load_lerobot()
     try:
         ep_filter = _parse_episodes(args.episodes)
@@ -617,7 +621,12 @@ def main() -> None:
             settings={key: value for key, value in vars(args).items()
                       if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
         annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
-    goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1"}
+    goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1",
+                   "pov_mask_policy": "object_negatives_growth_review_v1",
+                   "mask_settings": {key: value for key, value in vars(args).items()
+                                     if key.startswith("sam2_") and key != "sam2_corrections"},
+                   "mask_corrections_fingerprint": fingerprint(json.loads(args.sam2_corrections.read_text()))
+                       if args.sam2_corrections else None}
     if annotation_manifest:
         annotation_manifest.pop("fingerprint")
         annotation_manifest["goal_policy"] = goal_policy
@@ -635,7 +644,7 @@ def main() -> None:
             info_path = dst_root / "meta" / "info.json"
             if info_path.exists() and json.loads(info_path.read_text()).get("total_episodes", 0):
                 if not policy_path.exists() or json.loads(policy_path.read_text()) != goal_policy:
-                    raise ValueError("Destination uses older moving third-person goals; choose a fresh --dst-repo-id")
+                    raise ValueError("Destination grounding/mask policy differs; choose a fresh --dst-repo-id")
             check_output_mode(dst_root, args.debug_overlays)
             check_grounding_annotations(dst_root, annotation_manifest)
         except ValueError as exc:
@@ -847,6 +856,7 @@ def main() -> None:
                                    batch_size=args.decode_batch_size, backend=args.video_backend)
             episode_cache = []
             body_results = {}
+            negative_results = {}
             if sam is not None and hasattr(molmo, "ground_batch"):
                 requests, request_stages = [], []
                 for si, stage in enumerate(stages):
@@ -856,15 +866,21 @@ def main() -> None:
                     real = np.flatnonzero(data["masks"][CAMERA_WRIST][lo:hi+1])
                     if len(real):
                         requests.append((data["frames"][CAMERA_WRIST][lo+int(real[0])], BODY_PROMPT))
-                        request_stages.append(si)
+                        request_stages.append((si, "body"))
+                        if args.sam2_negative_prompts:
+                            requests.append((data["frames"][CAMERA_WRIST][lo+int(real[0])], NEGATIVE_PROMPT))
+                            request_stages.append((si, "negative"))
                 if requests:
                     try:
                         results = molmo.ground_batch(requests)
                         if len(results) != len(requests):
                             raise ValueError("Body-prompt batch length mismatch")
-                        body_results = dict(zip(request_stages, results))
+                        mapped = dict(zip(request_stages, results))
+                        body_results = {si: value for (si, kind), value in mapped.items() if kind == "body"}
+                        negative_results = {si: value for (si, kind), value in mapped.items() if kind == "negative"}
                     except Exception as exc:
-                        body_results = {si: {"error": str(exc)} for si in request_stages}
+                        body_results = {si: {"error": str(exc)} for si, _ in request_stages}
+                        negative_results = body_results.copy()
             for si, stage in enumerate(stages):
                 _, window_end = _stage_cluster_bounds(
                     stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
@@ -879,7 +895,12 @@ def main() -> None:
                         entry, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST],
                         molmo, sam, bank_root, ep_idx, si, corrections,
                         args.gripper_proximity_weight, args.gripper_proximity_radius, args.goal_tail_frames,
-                        prompt_result=body_results.get(si))
+                        prompt_result=body_results.get(si), negative_result=negative_results.get(si),
+                        negative_prompts=args.sam2_negative_prompts,
+                        require_negatives=args.sam2_require_negative_points,
+                        max_area_fraction=args.sam2_max_area_fraction,
+                        max_growth_ratio=args.sam2_max_growth_ratio,
+                        growth_area_fraction=args.sam2_growth_area_fraction)
                 episode_cache.append(entry)
             tail_cache.append(episode_cache)
             cache_episode_ids.append(ep_idx)

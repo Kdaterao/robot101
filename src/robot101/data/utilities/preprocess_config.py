@@ -72,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pov-gripper-filter", action=argparse.BooleanOptionalAction, default=True,
                    help="Exclude SAM 2 gripper masks from POV clustering; failed masks require review")
     p.add_argument("--sam2-model", default="facebook/sam2.1-hiera-tiny")
+    p.add_argument("--sam2-negative-prompts", action=argparse.BooleanOptionalAction, default=True,
+                   help="Ask Molmo for nearby non-gripper object points as negative SAM prompts")
+    p.add_argument("--sam2-require-negative-points", action=argparse.BooleanOptionalAction, default=True,
+                   help="Queue automatic masks for correction if object negatives are unavailable")
+    p.add_argument("--sam2-max-area-fraction", type=float, default=0.8)
+    p.add_argument("--sam2-max-growth-ratio", type=float, default=2.0,
+                   help="Flag mask growth versus preceding or seed frame when absolute growth also exceeds the limit")
+    p.add_argument("--sam2-growth-area-fraction", type=float, default=0.02,
+                   help="Minimum growth as fraction of image area before ratio-based review")
     p.add_argument("--sam2-corrections", type=Path,
                    help="JSON exact-frame positive/negative prompts from scripts/fix_gripper_masks.py")
     p.add_argument("--gripper-proximity-weight", type=float, default=2.0)
