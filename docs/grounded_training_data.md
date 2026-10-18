@@ -189,9 +189,11 @@ fails, only that provisional frame is available and is labeled for review; it is
 never approved for point culling. Use a fresh output destination after changing
 to this sequential policy; older outputs cannot be resumed into the new policy.
 
-SAM must include positive prompts and exclude negative prompts on that exact
-prompt frame. Near-coincident positive/negative points require review. Negative
-coordinates are not treated as stationary constraints across other video frames.
+SAM must include positive prompts on the seed frame. Negative points still guide
+refinement, but proximity to a positive point and inclusion inside the refined
+mask no longer trigger rejection. Negative coordinates are not treated as
+stationary constraints across other video frames. Empty/excessive masks, failed
+positive coverage and suspicious growth still trigger review/recovery.
 
 Mask growth exceeding **2×** the seed or preceding-frame area, with an absolute
 increase exceeding **2% of the image area**, queues correction. These are

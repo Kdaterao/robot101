@@ -629,7 +629,7 @@ def main() -> None:
                       if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
         annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
     goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1",
-                   "pov_mask_policy": "full_episode_pov_sparse_refresh_v4" if args.sam2_full_episode else "sequential_body_mask_object_negatives_v2",
+                   "pov_mask_policy": "full_episode_pov_sparse_refresh_v5_relaxed_negatives" if args.sam2_full_episode else "sequential_body_mask_object_negatives_v3_relaxed_negatives",
                    "mask_settings": {key: value for key, value in vars(args).items()
                                      if key.startswith("sam2_") and key != "sam2_corrections"},
                    "mask_corrections_fingerprint": fingerprint(json.loads(args.sam2_corrections.read_text()))

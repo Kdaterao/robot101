@@ -69,8 +69,6 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
             raise ValueError(f"negative_prompt_failed:{raw['error']}")
         if not len(negatives) and args.sam2_require_negative_points:
             raise ValueError('object_negative_points_unavailable')
-        if len(negatives) and (np.linalg.norm(negatives[:, None] - points[None], axis=-1) <= 3).any():
-            raise ValueError('positive_negative_prompts_conflict')
         return np.concatenate([points, negatives]), np.asarray([*labels, *([0]*len(negatives))], np.int32)
 
     def validate(frame, mask, seed_area, previous_area, points, labels):
@@ -90,8 +88,6 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
             inside = mask[pixels[:, 1], pixels[:, 0]]
             if not inside[np.asarray(labels) == 1].all():
                 return 'mask_misses_positive_prompt'
-            if inside[np.asarray(labels) == 0].any():
-                return 'mask_contains_negative_object_prompt'
         return None
 
     started = perf_counter()

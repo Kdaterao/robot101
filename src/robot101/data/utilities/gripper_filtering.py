@@ -91,8 +91,6 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
             negatives = valid_points(raw, w, h)
             metadata['negative_prompt'] = NEGATIVE_PROMPT
             metadata['negative_points_xy'] = negatives.tolist()
-            if len(negatives) and (np.linalg.norm(negatives[:, None] - points[None], axis=-1) <= 3).any():
-                raise ValueError('positive_negative_prompts_conflict')
             if not len(negatives) and require_negatives:
                 raise ValueError('object_negative_points_unavailable')
             labels += [0]*len(negatives)
@@ -138,12 +136,6 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
         px[:, 1] = np.clip(px[:, 1], 0, h-1)
         if not len(px) or not masks[seed, px[:, 1], px[:, 0]].all():
             raise ValueError('mask_misses_positive_prompt')
-        negative = np.rint(points[np.asarray(labels) == 0]).astype(int)
-        if len(negative):
-            negative[:, 0] = np.clip(negative[:, 0], 0, w-1)
-            negative[:, 1] = np.clip(negative[:, 1], 0, h-1)
-            if masks[seed, negative[:, 1], negative[:, 0]].any():
-                raise ValueError('mask_contains_negative_object_prompt')
         filtered, visibility, weights, eligible, endpoints = filter_candidates(
             entry['tracks'], entry['visible'], masks, max_weight, radius_fraction, goal_tail_frames)
         entry.update(tracks=filtered, visible=visibility, observation_weights=weights,
