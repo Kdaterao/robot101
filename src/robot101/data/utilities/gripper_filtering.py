@@ -11,7 +11,7 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
                            corrections, max_weight, radius_fraction, goal_tail_frames, prompt_result=None,
                            negative_result=None, negative_prompts=True, require_negatives=True,
                            max_area_fraction=0.8, max_growth_ratio=2.0, growth_area_fraction=0.02):
-    start = entry['tail_start']
+    start = int(entry['tail_start'])
     length = entry['tracks'].shape[1]
     clip = frames[start:start+length]
     real = np.asarray(real[start:start+length], bool)
@@ -80,8 +80,8 @@ def prepare_gripper_filter(entry, frames, real, molmo, sam, root, episode, subta
                  & (area[1:] - area[:-1] > growth_area_fraction))
         if growth.any() or jumps.any():
             metadata['area_fraction'] = area.tolist()
-            suspicious = list(np.flatnonzero(growth)) + (np.flatnonzero(jumps) + 1).tolist()
-            metadata['review_frame_index'] = start + min(suspicious)
+            suspicious = np.flatnonzero(growth).tolist() + (np.flatnonzero(jumps) + 1).tolist()
+            metadata['review_frame_index'] = int(start + min(suspicious))
             raise ValueError('suspicious_gripper_mask_growth')
         positive = np.asarray(labels) == 1
         px = np.rint(points[positive]).astype(int)
